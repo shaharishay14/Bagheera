@@ -1,0 +1,67 @@
+from datetime import datetime
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+
+# ---------- Inference ----------
+class InferenceRequest(BaseModel):
+    dataset_id: str = Field(min_length=1)
+    num_clusters: int = Field(ge=2, le=20)
+
+
+class InferenceResponse(BaseModel):
+    job_id: str
+    status: Literal["Queued"]
+
+
+# ---------- Jobs ----------
+class JobOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    dataset_id: str
+    num_clusters: int
+    status: str
+    priority: int
+    created_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error: str | None = None
+
+
+class JobStatusResponse(BaseModel):
+    job_id: str
+    status: str
+    progress: int
+
+
+class ReorderRequest(BaseModel):
+    ordered_job_ids: list[str]
+
+
+class ReorderResponse(BaseModel):
+    ordered_job_ids: list[str]
+    message: str = "Reordered"
+
+
+# ---------- Annotations ----------
+class AnnotationRequest(BaseModel):
+    target_id: str = Field(min_length=1)
+    target_type: Literal["slide", "cluster"]
+    note: str = Field(min_length=1)
+
+
+class AnnotationResponse(BaseModel):
+    annotation_id: str
+    message: str = "Saved"
+
+
+# ---------- Visualization ----------
+class VisualizationCluster(BaseModel):
+    cluster_id: str
+    patches: list[str]
+
+
+class VisualizationResponse(BaseModel):
+    clusters: list[VisualizationCluster]
