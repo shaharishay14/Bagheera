@@ -10,7 +10,7 @@ def _enqueue(client, dataset_id: str, num_clusters: int = 3) -> str:
         "/api/v1/inference",
         json={"dataset_id": dataset_id, "num_clusters": num_clusters},
     )
-    assert res.status_code == 200
+    assert res.status_code == 201
     return res.json()["job_id"]
 
 

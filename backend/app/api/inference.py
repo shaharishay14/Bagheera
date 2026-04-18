@@ -10,7 +10,7 @@ from app.schemas import InferenceRequest, InferenceResponse
 router = APIRouter(prefix="/api/v1", tags=["inference"])
 
 
-@router.post("/inference", response_model=InferenceResponse, status_code=200)
+@router.post("/inference", response_model=InferenceResponse, status_code=201)
 def submit_inference(payload: InferenceRequest, db: Session = Depends(get_db)) -> InferenceResponse:
     # Append-to-tail FIFO: priority = (max existing priority) + 1.
     # created_at is the secondary order, so two jobs at the same priority still resolve.

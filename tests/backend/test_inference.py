@@ -3,7 +3,7 @@ def test_post_inference_valid(client_no_worker):
         "/api/v1/inference",
         json={"dataset_id": "/data/slide.tiff", "num_clusters": 5},
     )
-    assert res.status_code == 200
+    assert res.status_code == 201
     body = res.json()
     assert body["status"] == "Queued"
     assert isinstance(body["job_id"], str) and len(body["job_id"]) == 32

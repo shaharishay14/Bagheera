@@ -27,7 +27,7 @@ def test_queue_drains_in_fifo_order(client_with_worker):
             "/api/v1/inference",
             json={"dataset_id": f"slide_{i}", "num_clusters": 3},
         )
-        assert res.status_code == 200
+        assert res.status_code == 201
         job_ids.append(res.json()["job_id"])
 
     finished = _wait_for_all_finished(client_with_worker, job_ids)
