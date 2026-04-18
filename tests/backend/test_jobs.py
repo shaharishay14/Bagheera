@@ -84,6 +84,38 @@ def test_reorder_empty_list_rejected(client_no_worker):
     assert res.status_code == 400
 
 
+def test_reorder_partial_list_does_not_corrupt_fifo(client_no_worker):
+    j1 = _enqueue(client_no_worker, "slide_1")
+    j2 = _enqueue(client_no_worker, "slide_2")
+    j3 = _enqueue(client_no_worker, "slide_3")
+    j4 = _enqueue(client_no_worker, "slide_4")
+
+    res = client_no_worker.put(
+        "/api/v1/jobs/reorder", json={"ordered_job_ids": [j2, j1]}
+    )
+    assert res.status_code == 200
+
+    listed = client_no_worker.get("/api/v1/jobs").json()
+    assert [j["id"] for j in listed] == [j2, j1, j3, j4]
+
+
+def test_reorder_single_job_renormalizes_all_queued(client_no_worker):
+    """Promote one job; verify priorities are contiguous with no collisions."""
+    j1 = _enqueue(client_no_worker, "slide_1")
+    j2 = _enqueue(client_no_worker, "slide_2")
+    j3 = _enqueue(client_no_worker, "slide_3")
+    j4 = _enqueue(client_no_worker, "slide_4")
+
+    res = client_no_worker.put(
+        "/api/v1/jobs/reorder", json={"ordered_job_ids": [j3]}
+    )
+    assert res.status_code == 200
+
+    listed = client_no_worker.get("/api/v1/jobs").json()
+    assert [j["id"] for j in listed] == [j3, j1, j2, j4]
+    assert [j["priority"] for j in listed] == [0, 1, 2, 3]
+
+
 def test_job_created_at_is_tzaware(client_no_worker):
     jid = _enqueue(client_no_worker, "slide_tz")
     db = SessionLocal()

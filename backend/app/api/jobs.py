@@ -54,9 +54,20 @@ def reorder_jobs(payload: ReorderRequest, db: Session = Depends(get_db)) -> Reor
             detail=f"Cannot reorder jobs not in Queued state: {not_queued}",
         )
 
-    # Single transaction: rewrite priority for the listed ids to 0..N-1.
+    # Listed jobs go first (0..N-1) in the requested order.
     for new_priority, jid in enumerate(payload.ordered_job_ids):
         by_id[jid].priority = new_priority
+
+    # Unlisted Queued jobs follow (N..) preserving their original relative FIFO order.
+    listed_ids = set(payload.ordered_job_ids)
+    unlisted = (
+        db.query(Job)
+        .filter(Job.status == "Queued", Job.id.notin_(listed_ids))
+        .order_by(Job.priority.asc(), Job.created_at.asc())
+        .all()
+    )
+    for i, j in enumerate(unlisted):
+        j.priority = len(payload.ordered_job_ids) + i
     db.commit()
 
     return ReorderResponse(ordered_job_ids=payload.ordered_job_ids)
