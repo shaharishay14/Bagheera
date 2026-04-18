@@ -65,6 +65,16 @@ class AnnotationResponse(BaseModel):
     message: str = "Saved"
 
 
+class AnnotationOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    annotation_id: str
+    target_id: str
+    target_type: str
+    note: str
+    created_at: datetime
+
+
 # ---------- Visualization ----------
 class VisualizationCluster(BaseModel):
     cluster_id: str
