@@ -7,7 +7,7 @@ both claims and finalizes each job. The split is documented in tests/LESSONS.md.
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from uuid import uuid4
 
 from sqlalchemy.orm import Session
@@ -38,7 +38,7 @@ def _claim_next_job(db: Session) -> Job | None:
         db.commit()
         return None
     job.status = "Processing"
-    job.started_at = datetime.utcnow()
+    job.started_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(job)
     return job
@@ -50,7 +50,7 @@ def _process_job(db: Session, job: Job) -> None:
     except Exception as exc:  # noqa: BLE001 — we want to record any failure
         logger.exception("Job %s failed in mock_panther.run", job.id)
         db.query(Job).filter(Job.id == job.id).update(
-            {"status": "Error", "error": str(exc), "finished_at": datetime.utcnow()}
+            {"status": "Error", "error": str(exc), "finished_at": datetime.now(timezone.utc)}
         )
         db.commit()
         return
@@ -65,7 +65,7 @@ def _process_job(db: Session, job: Job) -> None:
             )
         )
     db.query(Job).filter(Job.id == job.id).update(
-        {"status": "Done", "finished_at": datetime.utcnow()}
+        {"status": "Done", "finished_at": datetime.now(timezone.utc)}
     )
     db.commit()
 

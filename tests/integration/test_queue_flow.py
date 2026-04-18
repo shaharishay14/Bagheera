@@ -56,7 +56,7 @@ def test_reorder_then_drain_respects_new_order(client_with_worker):
     db = SessionLocal()
     try:
         from uuid import uuid4
-        from datetime import datetime
+        from datetime import datetime, timezone
 
         sentinel = Job(
             id=uuid4().hex,
@@ -64,8 +64,8 @@ def test_reorder_then_drain_respects_new_order(client_with_worker):
             num_clusters=2,
             status="Processing",
             priority=-1,
-            created_at=datetime.utcnow(),
-            started_at=datetime.utcnow(),
+            created_at=datetime.now(timezone.utc),
+            started_at=datetime.now(timezone.utc),
         )
         db.add(sentinel)
         db.commit()

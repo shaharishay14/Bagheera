@@ -1,4 +1,6 @@
 """Job queue tests, including TC-01 (priority reorder) and TC-02 (job lock)."""
+from datetime import timezone
+
 from app.db.database import SessionLocal
 from app.db.models import Job
 
@@ -80,3 +82,15 @@ def test_reorder_unknown_id_returns_404(client_no_worker):
 def test_reorder_empty_list_rejected(client_no_worker):
     res = client_no_worker.put("/api/v1/jobs/reorder", json={"ordered_job_ids": []})
     assert res.status_code == 400
+
+
+def test_job_created_at_is_tzaware(client_no_worker):
+    jid = _enqueue(client_no_worker, "slide_tz")
+    db = SessionLocal()
+    try:
+        db.expire_all()
+        job = db.get(Job, jid)
+        assert job.created_at.tzinfo is not None
+        assert job.created_at.tzinfo.utcoffset(job.created_at).total_seconds() == 0
+    finally:
+        db.close()

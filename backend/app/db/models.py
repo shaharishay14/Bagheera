@@ -1,9 +1,10 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
+from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
+from app.db.types import UTCDateTime
 
 
 # Status values are kept as plain strings (not a SQLAlchemy Enum) so the
@@ -21,9 +22,9 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="Queued")
     # priority: lower runs sooner. Reorder rewrites this to 0..N for queued rows.
     priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
-    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
+    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     clusters: Mapped[list["Cluster"]] = relationship(
@@ -38,7 +39,7 @@ class Annotation(Base):
     target_id: Mapped[str] = mapped_column(String(255), nullable=False)
     target_type: Mapped[str] = mapped_column(String(32), nullable=False)  # "slide" | "cluster"
     note: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
 
 
 class Cluster(Base):
