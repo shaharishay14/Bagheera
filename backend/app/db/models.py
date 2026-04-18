@@ -53,5 +53,6 @@ class Cluster(Base):
     job_id: Mapped[str] = mapped_column(String(32), ForeignKey("jobs.id", ondelete="CASCADE"))
     label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     patches_json: Mapped[str] = mapped_column(Text, nullable=False)  # JSON-encoded list of paths
+    prototype_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
     job: Mapped[Job] = relationship(back_populates="clusters")

@@ -70,6 +70,7 @@ def _process_job(db: Session, job: Job) -> None:
                 job_id=job.id,
                 label=out.label,
                 patches_json=out.patches_json,
+                prototype_index=out.prototype_index,
             )
         )
     db.query(Job).filter(Job.id == job.id).update(
