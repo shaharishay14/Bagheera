@@ -1,16 +1,18 @@
 import { NavLink } from "react-router-dom";
+import logo from "../assets/bagheera-logo.svg";
 
 const linkClass = ({ isActive }) =>
-  `px-3 py-2 rounded-md text-sm font-medium transition ${
-    isActive ? "bg-slate-900 text-white" : "text-slate-700 hover:bg-slate-200"
+  `text-sm font-body transition-colors pb-0.5 ${
+    isActive
+      ? "text-white font-medium border-b-2 border-accent"
+      : "text-panther-200 hover:text-white"
   }`;
 
 export default function NavBar() {
   return (
-    <header className="bg-white border-b border-slate-200">
-      <nav className="max-w-5xl mx-auto px-6 py-3 flex items-center gap-4">
-        <span className="text-lg font-bold text-slate-900">Bagheera</span>
-        <span className="text-xs text-slate-500">PANTHER GUI · Sheba</span>
+    <header className="bg-panther-900 border-b border-panther-800">
+      <nav className="max-w-5xl mx-auto px-6 flex items-center gap-6 h-14">
+        <img src={logo} alt="Bagheera" className="h-7 w-auto" />
         <div className="flex-1" />
         <NavLink to="/inference" className={linkClass}>
           Inference

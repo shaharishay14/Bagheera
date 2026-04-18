@@ -46,7 +46,6 @@ export default function JobsDashboard() {
     if (oldIndex === -1 || newIndex === -1) return;
 
     const reordered = arrayMove(queued, oldIndex, newIndex);
-    // Optimistic update
     setJobs([...reordered, ...others]);
 
     try {
@@ -65,14 +64,14 @@ export default function JobsDashboard() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold text-slate-900">Jobs Dashboard</h1>
+      <h1 className="font-display text-3xl text-panther-900">Jobs Dashboard</h1>
 
       <section>
-        <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wide mb-2">
+        <h2 className="font-body font-medium text-panther-600 uppercase tracking-widest text-xs mb-3">
           Queued ({queued.length}) · drag to reorder
         </h2>
         {queued.length === 0 ? (
-          <p className="text-sm text-slate-500">No queued jobs.</p>
+          <p className="text-panther-400 text-sm italic">No queued jobs.</p>
         ) : (
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={onDragEnd}>
             <SortableContext items={queued.map((j) => j.id)} strategy={verticalListSortingStrategy}>
@@ -87,11 +86,11 @@ export default function JobsDashboard() {
       </section>
 
       <section>
-        <h2 className="text-sm font-semibold text-slate-700 uppercase tracking-wide mb-2">
+        <h2 className="font-body font-medium text-panther-600 uppercase tracking-widest text-xs mb-3">
           Active &amp; Finished ({others.length})
         </h2>
         {others.length === 0 ? (
-          <p className="text-sm text-slate-500">Nothing here yet.</p>
+          <p className="text-panther-400 text-sm italic">Nothing here yet.</p>
         ) : (
           <div className="space-y-2">
             {others.map((job) => (
