@@ -45,8 +45,16 @@ def _claim_next_job(db: Session) -> Job | None:
 
 
 def _process_job(db: Session, job: Job) -> None:
+    config = mock_panther.RunConfig(
+        dataset_id=job.dataset_id,
+        num_clusters=job.num_clusters,
+        encoder=job.encoder,
+        em_iter=job.em_iter,
+        tau=job.tau,
+        out_type=job.out_type,
+    )
     try:
-        outputs = mock_panther.run(job.num_clusters)
+        outputs = mock_panther.run(config)
     except Exception as exc:  # noqa: BLE001 — we want to record any failure
         logger.exception("Job %s failed in mock_panther.run", job.id)
         db.query(Job).filter(Job.id == job.id).update(

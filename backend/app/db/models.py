@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 
-from sqlalchemy import ForeignKey, Integer, String, Text
+from sqlalchemy import Float, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -26,6 +26,10 @@ class Job(Base):
     started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    encoder: Mapped[str] = mapped_column(String(32), nullable=False, default="uni")
+    em_iter: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    tau: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    out_type: Mapped[str] = mapped_column(String(32), nullable=False, default="allcat")
 
     clusters: Mapped[list["Cluster"]] = relationship(
         back_populates="job", cascade="all, delete-orphan"

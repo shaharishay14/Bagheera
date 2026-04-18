@@ -7,7 +7,11 @@ from pydantic import BaseModel, ConfigDict, Field
 # ---------- Inference ----------
 class InferenceRequest(BaseModel):
     dataset_id: str = Field(min_length=1)
-    num_clusters: int = Field(ge=2, le=20)
+    num_clusters: int = Field(ge=2, le=32)
+    encoder: Literal["uni", "ctranspath", "resnet50"] = "uni"
+    em_iter: int = Field(ge=1, le=10, default=1)
+    tau: float = Field(ge=0.01, le=10.0, default=1.0)
+    out_type: Literal["allcat", "weight_avg_mean", "weight_avg_all"] = "allcat"
 
 
 class InferenceResponse(BaseModel):
@@ -28,6 +32,10 @@ class JobOut(BaseModel):
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error: str | None = None
+    encoder: str = "uni"
+    em_iter: int = 1
+    tau: float = 1.0
+    out_type: str = "allcat"
 
 
 class JobStatusResponse(BaseModel):

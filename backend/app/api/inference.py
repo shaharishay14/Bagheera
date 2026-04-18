@@ -21,6 +21,10 @@ def submit_inference(payload: InferenceRequest, db: Session = Depends(get_db)) -
         id=uuid4().hex,
         dataset_id=payload.dataset_id,
         num_clusters=payload.num_clusters,
+        encoder=payload.encoder,
+        em_iter=payload.em_iter,
+        tau=payload.tau,
+        out_type=payload.out_type,
         status="Queued",
         priority=next_priority,
     )
