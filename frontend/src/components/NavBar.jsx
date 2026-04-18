@@ -21,6 +21,9 @@ export default function NavBar() {
         <NavLink to="/annotations" className={linkClass}>
           Annotations
         </NavLink>
+        <NavLink to="/compare" className={linkClass}>
+          Compare
+        </NavLink>
       </nav>
     </header>
   );

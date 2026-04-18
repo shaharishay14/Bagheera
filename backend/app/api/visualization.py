@@ -18,7 +18,24 @@ def get_visualization(job_id: str, db: Session = Depends(get_db)) -> Visualizati
 
     rows = db.query(Cluster).filter(Cluster.job_id == job_id).all()
     clusters = [
-        VisualizationCluster(cluster_id=c.id, patches=json.loads(c.patches_json))
+        VisualizationCluster(
+            cluster_id=c.id,
+            label=c.label,
+            patches=json.loads(c.patches_json),
+            prototype_index=c.prototype_index,
+        )
         for c in rows
     ]
-    return VisualizationResponse(clusters=clusters)
+    return VisualizationResponse(
+        job_id=job.id,
+        dataset_id=job.dataset_id,
+        num_clusters=job.num_clusters,
+        encoder=job.encoder,
+        em_iter=job.em_iter,
+        tau=job.tau,
+        out_type=job.out_type,
+        status=job.status,
+        started_at=job.started_at,
+        finished_at=job.finished_at,
+        clusters=clusters,
+    )

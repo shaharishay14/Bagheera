@@ -78,8 +78,20 @@ class AnnotationOut(BaseModel):
 # ---------- Visualization ----------
 class VisualizationCluster(BaseModel):
     cluster_id: str
+    label: str | None
     patches: list[str]
+    prototype_index: int
 
 
 class VisualizationResponse(BaseModel):
+    job_id: str
+    dataset_id: str
+    num_clusters: int
+    encoder: str
+    em_iter: int
+    tau: float
+    out_type: str
+    status: str
+    started_at: datetime | None
+    finished_at: datetime | None
     clusters: list[VisualizationCluster]

@@ -3,6 +3,7 @@ import NavBar from "./components/NavBar.jsx";
 import InferencePage from "./pages/InferencePage.jsx";
 import JobsDashboard from "./pages/JobsDashboard.jsx";
 import AnnotationsPage from "./pages/AnnotationsPage.jsx";
+import ComparePage from "./pages/ComparePage.jsx";
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
           <Route path="/inference" element={<InferencePage />} />
           <Route path="/jobs" element={<JobsDashboard />} />
           <Route path="/annotations" element={<AnnotationsPage />} />
+          <Route path="/compare" element={<ComparePage />} />
         </Routes>
       </main>
     </div>
