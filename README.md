@@ -1,154 +1,106 @@
 # Bagheera
 
-GUI for the **PANTHER** pathology model — built for Sheba Medical Center.
-Pathologists submit inference jobs against TIFF datasets, watch them flow
-through a FIFO queue (with drag-and-drop reordering), and attach clinical
-annotations to slides or clusters.
-
-> PANTHER itself is **mocked** in this MVP. The mock worker sleeps 5–15 s,
-> writes fake clusters, and trips a 10 % error to exercise the failure path.
-> See `backend/app/workers/mock_panther.py` — it is the only file the real
-> model integration needs to replace.
-
-Detailed design lives in [`docs/Detailed Design - submit.docx`](docs/).
-
----
+Web GUI for orchestrating the [TRIDENT](https://github.com/mahmoodlab/TRIDENT)
+and [PANTHER](https://github.com/mahmoodlab/PANTHER) computational-pathology
+pipelines. Two training pages: `/training/trident` (feature extraction) and
+`/training/panther` (split + prototype training). Annotations, embedding
+construction, downstream tasks, and visualization are out of scope for this
+iteration.
 
 ## Stack
 
-| Layer    | Tech                                                       |
-| -------- | ---------------------------------------------------------- |
-| Frontend | React 18 + Vite + Tailwind, drag-and-drop via `@dnd-kit`   |
-| Backend  | FastAPI + SQLAlchemy 2 + Pydantic v2                       |
-| DB       | SQLite (file at `backend/bagheera.db`, auto-created)       |
-| Worker   | In-process daemon thread, started in FastAPI `lifespan`    |
-| Tests    | pytest + `httpx.TestClient`, results in `tests/results/`   |
+- **Backend:** Python 3.10+, FastAPI, Uvicorn, SQLAlchemy (SQLite), Pydantic v2
+- **Frontend:** React 18 + TypeScript, Vite, TailwindCSS
+- **Process execution:** the backend invokes `backend/scripts/run_trident.sh`
+  via `subprocess` (synchronously, for now)
 
-API and worker communicate **only** via the database — the API never blocks
-on heavy work and the worker has no idea HTTP exists (design §2.2).
+## Layout
 
----
+```
+backend/   FastAPI app, services, bash wrapper, SQLite migrations
+frontend/  Vite + React + Tailwind app
+```
 
-## Run the backend
+## First-time setup
+
+### 1. Configure the backend environment
 
 ```bash
 cd backend
-python -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-uvicorn app.main:app --reload
 ```
 
-API: <http://localhost:8000>  ·  Swagger: <http://localhost:8000/docs>
+Edit `backend/.env`:
 
-The worker thread starts automatically on app startup. Set
-`WORKER_ENABLED=false` in `.env` to disable it (useful when poking at the
-DB by hand).
+| Var | Notes |
+| --- | --- |
+| `TRIDENT_ALLOWED_ROOTS` | Colon-separated absolute paths the directory browser may traverse. Defaults to your home directory for local dev — **production must set this explicitly.** Example: `/data/wsis:/home/researcher`. |
+| `TRIDENT_REPO_PATH` | Absolute path to a checkout of TRIDENT. The wrapper runs `${TRIDENT_REPO_PATH}/run_batch_of_slides.py`. |
+| `TRIDENT_PYTHON` | Python interpreter with TRIDENT's deps installed. Defaults to `python`. |
+| `PANTHER_REPO_PATH` | Absolute path to a checkout of [PANTHER](https://github.com/mahmoodlab/PANTHER). Set up its conda env per `${PANTHER_REPO_PATH}/env.yaml`. The backend runs `python -m training.main_prototype` with cwd `${PANTHER_REPO_PATH}/src` and `CUDA_VISIBLE_DEVICES=0`. `${PANTHER_REPO_PATH}/src/splits/` must be writable by the backend process. |
+| `BAGHEERA_DB_PATH` | SQLite file path. Defaults to `./bagheera.db`. |
 
-### Smoke check
-
-```bash
-curl -X POST http://localhost:8000/api/v1/inference \
-  -H 'content-type: application/json' \
-  -d '{"dataset_id":"/data/slide_001.tiff","num_clusters":4}'
-# → {"job_id":"<hex>","status":"Queued"}
-```
-
-Within ~15 s, `GET /api/v1/jobs/<job_id>/status` will return `Done`
-(or `Error` ~10 % of the time).
-
----
-
-## Run the frontend
+### 2. Install frontend deps
 
 ```bash
 cd frontend
 npm install
-cp .env.example .env
+```
+
+## Run locally
+
+In one terminal:
+
+```bash
+cd backend
+source .venv/bin/activate
+set -a; source .env; set +a   # or export the vars yourself
+uvicorn app.main:app --reload --port 8000
+```
+
+In another terminal:
+
+```bash
+cd frontend
 npm run dev
 ```
 
-UI: <http://localhost:5173>. CORS is preconfigured for that origin.
+Open <http://localhost:5173>. The Vite dev server proxies `/api/*` to
+`http://localhost:8000`, so no CORS round-trip is needed during dev — CORS is
+also enabled on the backend for completeness.
 
-Pages:
-- `/inference` — submit a new job (dataset path + cluster count 2–20).
-- `/jobs` — polls every 2 s. Drag rows in the **Queued** section to
-  reorder; rows in `Processing` show a 🔒 lock and cannot be dragged.
-- `/annotations` — POST a slide- or cluster-level note.
+## Endpoints
 
----
+| Method | Path | Notes |
+| --- | --- | --- |
+| `GET` | `/api/health` | liveness check |
+| `GET` | `/api/fs/roots` | configured allowed roots |
+| `GET` | `/api/fs/list?path=&filter=dirs_only&show_hidden=` | sandboxed directory listing |
+| `GET` | `/api/fs/csv-count?path=` | row count for a CSV inside an allowed root |
+| `POST` | `/api/trident/run` | run TRIDENT feature extraction synchronously |
+| `GET` | `/api/trident/runs` | list TRIDENT runs |
+| `GET` | `/api/trident/runs/{id}` | single TRIDENT run |
+| `POST` | `/api/panther/run` | generate splits + run PANTHER prototype training synchronously |
+| `GET` | `/api/panther/runs` | list PANTHER runs |
+| `GET` | `/api/panther/runs/{id}` | single PANTHER run |
 
-## Run the tests
+OpenAPI: <http://localhost:8000/docs>.
 
-```bash
-cd backend && source .venv/bin/activate && cd ..
-pytest -q
-```
+## Security model for the directory browser
 
-- Unit tests cover every endpoint plus the queue invariants TC-01
-  (priority reorder) and TC-02 (job lock while processing) from design §8.
-- An integration test boots the real worker, enqueues 5 jobs, and asserts
-  they finish in FIFO order. A second integration test reorders mid-flight
-  and asserts execution follows the new order.
-- Each run writes a JSON summary to `tests/results/run-<utc>.json`.
-- Lessons-learned and future work live in `tests/LESSONS.md`.
+`/api/fs/list` and `/api/trident/run` both resolve their path argument with
+`Path.resolve()` and require the result to live inside one of the configured
+`TRIDENT_ALLOWED_ROOTS`. That blocks `../` traversal and symlink escapes even
+when the user pastes a raw path into the form, so the run endpoint cannot
+serve as a backdoor around the browser's restrictions.
 
----
+## Known limitations / TODOs
 
-## Project layout
-
-```
-backend/
-  app/
-    main.py              # FastAPI app + lifespan that starts the worker
-    config.py            # pydantic-settings reading .env
-    schemas.py           # request/response models matching design §2.3
-    api/
-      inference.py       # POST /api/v1/inference
-      jobs.py            # GET /jobs, GET /jobs/{id}/status, PUT /jobs/reorder
-      annotations.py     # POST /api/v1/annotations
-      visualization.py   # GET /api/v1/visualization/{job_id}
-    db/
-      database.py        # engine + SessionLocal + get_db dependency
-      models.py          # Job, Annotation, Cluster
-    workers/
-      queue_worker.py    # daemon thread: claim → mock_panther.run → Done/Error
-      mock_panther.py    # the only file to swap out for real PANTHER
-  requirements.txt
-  .env.example
-frontend/
-  src/
-    api/                 # axios client + per-resource modules
-    components/          # NavBar, JobRow, StatusBadge, Toast
-    pages/               # Inference, JobsDashboard, Annotations
-  package.json
-  tailwind.config.js
-tests/
-  conftest.py            # fixtures + results recorder
-  backend/               # unit tests for every endpoint
-  integration/           # end-to-end queue flow tests
-  results/               # per-run JSON summaries
-  LESSONS.md             # monitoring notes + future work
-docs/
-  Detailed Design - submit.docx
-.claude/
-  .CLAUDE.md             # working agreement for Claude Code
-  skills/                # backend / frontend / database skill files
-```
-
----
-
-## Out of scope for the MVP
-
-These are intentionally **not** implemented and documented in
-`tests/LESSONS.md`:
-
-- Authentication / authorization
-- Real PANTHER inference + GPU scheduling
-- WSI viewer (OpenSeadragon / DeepZoom)
-- File uploads (`POST /api/v1/datasets/upload` from design §2.3)
-- H5 / PT feature-vector ingestion
-- Semantic-label assignment UI (`PUT /api/v1/labels/{cluster_id}`)
-- Alembic migrations (we use `create_all` on startup)
-- Split Execution / Result workers (collapsed into one for the mock)
+- `subprocess.Popen(...).communicate()` is synchronous — the HTTP request
+  blocks for the full TRIDENT run. Real deployments need to switch to a
+  background task queue with status polling and (later) log streaming.
+- No auth.
+- No PANTHER, annotation, or visualization pages yet.

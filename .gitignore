@@ -1,24 +1,32 @@
 # Python
 __pycache__/
 *.py[cod]
-*.egg-info/
 .venv/
 venv/
-.env
+*.egg-info/
 .pytest_cache/
-
-# SQLite
-*.db
-*.db-journal
+.mypy_cache/
+.ruff_cache/
 
 # Node
 node_modules/
 dist/
+.vite/
 
-# Editors
-.vscode/
-.idea/
+# Env / local config
+.env
+.env.local
+*.local
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# TRIDENT output
+trident_processed/
+
+# Editor / OS
 .DS_Store
-
-# Test outputs (keep the dir, ignore generated runs)
-tests/results/run-*.json
+.idea/
+.vscode/

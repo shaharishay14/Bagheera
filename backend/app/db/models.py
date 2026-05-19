@@ -1,58 +1,59 @@
-from datetime import datetime, timezone
+"""SQLAlchemy ORM models."""
+from __future__ import annotations
 
-from sqlalchemy import Float, ForeignKey, Integer, String, Text
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from datetime import datetime
+
+from sqlalchemy import DateTime, Float, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.database import Base
-from app.db.types import UTCDateTime
 
 
-# Status values are kept as plain strings (not a SQLAlchemy Enum) so the
-# worker thread can update them with simple equality comparisons and tests
-# can introspect without importing an enum type.
-JOB_STATUSES = ("Queued", "Processing", "Done", "Error")
+class TridentRun(Base):
+    __tablename__ = "trident_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    dataset_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    wsi_dir: Mapped[str] = mapped_column(String, nullable=False)
+    patch_encoder: Mapped[str] = mapped_column(String(32), nullable=False)
+    mag: Mapped[int] = mapped_column(Integer, nullable=False)
+    patch_size: Mapped[int] = mapped_column(Integer, nullable=False)
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    stdout: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    stderr: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    output_dir: Mapped[str] = mapped_column(String, nullable=False)
+    return_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
 
-class Job(Base):
-    __tablename__ = "jobs"
+class PantherRun(Base):
+    __tablename__ = "panther_runs"
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    dataset_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    num_clusters: Mapped[int] = mapped_column(Integer, nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="Queued")
-    # priority: lower runs sooner. Reorder rewrites this to 0..N for queued rows.
-    priority: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
-    started_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-    finished_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
-    error: Mapped[str | None] = mapped_column(Text, nullable=True)
-    encoder: Mapped[str] = mapped_column(String(32), nullable=False, default="uni")
-    em_iter: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
-    tau: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
-    out_type: Mapped[str] = mapped_column(String(32), nullable=False, default="allcat")
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    dataset_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    features_dir: Mapped[str] = mapped_column(String, nullable=False)
+    source_csv: Mapped[str] = mapped_column(String, nullable=False)
 
-    clusters: Mapped[list["Cluster"]] = relationship(
-        back_populates="job", cascade="all, delete-orphan"
-    )
+    train_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    val_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    test_pct: Mapped[float] = mapped_column(Float, nullable=False)
+    n_chunks: Mapped[int] = mapped_column(Integer, nullable=False)
 
+    mode: Mapped[str] = mapped_column(String(16), nullable=False)
+    in_dim: Mapped[int] = mapped_column(Integer, nullable=False)
+    n_proto_patches: Mapped[int] = mapped_column(Integer, nullable=False)
+    n_proto: Mapped[int] = mapped_column(Integer, nullable=False)
+    n_init: Mapped[int] = mapped_column(Integer, nullable=False)
+    seed: Mapped[int] = mapped_column(Integer, nullable=False)
+    num_workers: Mapped[int] = mapped_column(Integer, nullable=False)
 
-class Annotation(Base):
-    __tablename__ = "annotations"
+    command: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    stdout: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    stderr: Mapped[str] = mapped_column(Text, default="", nullable=False)
+    return_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    target_id: Mapped[str] = mapped_column(String(255), nullable=False)
-    target_type: Mapped[str] = mapped_column(String(32), nullable=False)  # "slide" | "cluster"
-    note: Mapped[str] = mapped_column(Text, nullable=False)
-    created_at: Mapped[datetime] = mapped_column(UTCDateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
-
-
-class Cluster(Base):
-    __tablename__ = "clusters"
-
-    id: Mapped[str] = mapped_column(String(32), primary_key=True)
-    job_id: Mapped[str] = mapped_column(String(32), ForeignKey("jobs.id", ondelete="CASCADE"))
-    label: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    patches_json: Mapped[str] = mapped_column(Text, nullable=False)  # JSON-encoded list of paths
-    prototype_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-
-    job: Mapped[Job] = relationship(back_populates="clusters")
+    # JSON-encoded {"train": N, "val": N, "test": N, "unused": N, "total": N}
+    split_counts: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
