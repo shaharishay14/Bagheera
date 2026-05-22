@@ -1,6 +1,7 @@
 import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-dom';
 import TridentTrainingPage from './pages/TridentTrainingPage';
 import PantherTrainingPage from './pages/PantherTrainingPage';
+import ModelsBrowserPage from './pages/ModelsBrowserPage';
 
 export default function App() {
   return (
@@ -13,6 +14,8 @@ export default function App() {
               <span className="mr-2 text-slate-400">Training</span>
               <TopLink to="/training/trident" label="TRIDENT" />
               <TopLink to="/training/panther" label="PANTHER" />
+              <span className="mx-2 text-slate-300">|</span>
+              <TopLink to="/models" label="Models" />
             </nav>
           </div>
         </header>
@@ -22,6 +25,7 @@ export default function App() {
             <Route path="/training" element={<Navigate to="/training/trident" replace />} />
             <Route path="/training/trident" element={<TridentTrainingPage />} />
             <Route path="/training/panther" element={<PantherTrainingPage />} />
+            <Route path="/models" element={<ModelsBrowserPage />} />
             <Route path="*" element={<Navigate to="/training/trident" replace />} />
           </Routes>
         </main>
