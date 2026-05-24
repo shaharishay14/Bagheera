@@ -11,8 +11,6 @@ from pathlib import Path
 
 from app.models.schemas import DATASET_NAME_PATTERN
 
-# TODO: switch to async background task with status polling.
-
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 WRAPPER_SCRIPT = BACKEND_DIR / "scripts" / "run_panther.sh"
 

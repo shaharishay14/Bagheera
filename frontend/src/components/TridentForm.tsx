@@ -9,7 +9,7 @@ import {
 } from '../lib/api';
 
 const MAG = 20;
-const TASK = 'feat';
+const TASK = 'all';
 const JOB_DIR_ROOT = './trident_processed';
 const DATASET_NAME_RE = /^[A-Za-z0-9_-]+$/;
 

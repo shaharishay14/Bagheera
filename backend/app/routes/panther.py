@@ -1,4 +1,9 @@
-"""PANTHER K-fold run endpoints."""
+"""PANTHER training endpoints — async, returns immediately after enqueuing the job.
+
+Read-only listing endpoints for PantherRun (per-fold execution logs) and Model
+rows remain here for now; broader Models/Groups CRUD lives in routes/models.py
+(PR 4).
+"""
 from __future__ import annotations
 
 import json
@@ -7,133 +12,23 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.db.database import get_db
-from app.db.models import Model, PantherRun, Split
+from app.db.models import Model, ModelGroup, PantherRun, Split, TridentRun
 from app.models.schemas import (
-    CreateSplitRequest,
-    FoldOutcome,
-    KFoldRunSummary,
     ModelInfo,
     PantherKFoldRunRequest,
-    PantherKFoldRunResponse,
+    PantherKFoldStartResponse,
     PantherRunInfo,
-    SplitInfo,
 )
 from app.services import panther_runner
 from app.services.fs import resolve_within_roots
-from app.services.splitter import SplitterError, create_kfold_split
+from app.services.worker import enqueue_job
 
 router = APIRouter(prefix="/api/panther", tags=["panther"])
-
-
-# --- splits ---------------------------------------------------------------
-
-
-def _split_to_info(row: Split) -> SplitInfo:
-    return SplitInfo(
-        id=row.id,
-        created_at=row.created_at,
-        dataset_name=row.dataset_name,
-        split_name=row.split_name,
-        abs_path=row.abs_path,
-        source_csv=row.source_csv,
-        k=row.k,
-        seed=row.seed,
-        total_rows=row.total_rows,
-        per_fold_counts=json.loads(row.per_fold_counts or "[]"),
-    )
-
-
-def _require_panther_repo() -> str:
-    if not settings.panther_repo_path:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="PANTHER_REPO_PATH is not set on the server.",
-        )
-    return settings.panther_repo_path
-
-
-def _create_split_record(
-    db: Session,
-    *,
-    dataset_name: str,
-    source_csv: Path,
-    k: int,
-    seed: int,
-) -> Split:
-    repo_path = _require_panther_repo()
-    output_root = panther_runner.dataset_splits_root_abs(repo_path, dataset_name)
-    output_root.mkdir(parents=True, exist_ok=True)
-
-    try:
-        info = create_kfold_split(
-            dataset_name=dataset_name,
-            source_csv=source_csv,
-            output_root=output_root,
-            k=k,
-            seed=seed,
-        )
-    except SplitterError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
-    except PermissionError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Cannot write split files under {output_root}: {exc}",
-        )
-
-    row = Split(
-        id=str(uuid.uuid4()),
-        created_at=datetime.utcnow(),
-        dataset_name=dataset_name,
-        split_name=info.split_name,
-        abs_path=str(info.abs_path),
-        source_csv=str(source_csv),
-        k=info.k,
-        seed=info.seed,
-        total_rows=info.total_rows,
-        per_fold_counts=json.dumps(info.per_fold_dicts()),
-    )
-    db.add(row)
-    db.commit()
-    db.refresh(row)
-    return row
-
-
-@router.post("/splits", response_model=SplitInfo)
-def create_split(payload: CreateSplitRequest, db: Session = Depends(get_db)) -> SplitInfo:
-    _require_panther_repo()
-    source_csv = resolve_within_roots(payload.source_csv)
-    if not source_csv.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="source_csv must be an existing file.",
-        )
-    row = _create_split_record(
-        db,
-        dataset_name=payload.dataset_name,
-        source_csv=source_csv,
-        k=payload.k,
-        seed=payload.seed,
-    )
-    return _split_to_info(row)
-
-
-@router.get("/splits", response_model=list[SplitInfo])
-def list_splits(
-    dataset_name: str | None = Query(None),
-    db: Session = Depends(get_db),
-) -> list[SplitInfo]:
-    q = db.query(Split).order_by(Split.created_at.desc())
-    if dataset_name:
-        q = q.filter(Split.dataset_name == dataset_name)
-    return [_split_to_info(r) for r in q.all()]
-
-
-# --- models ---------------------------------------------------------------
 
 
 def _model_to_info(row: Model) -> ModelInfo:
@@ -142,13 +37,16 @@ def _model_to_info(row: Model) -> ModelInfo:
         created_at=row.created_at,
         base_name=row.base_name,
         model_name=row.model_name,
+        display_name=row.display_name,
         group_id=row.group_id,
         fold_index=row.fold_index,
         fold_k=row.fold_k,
         dataset_name=row.dataset_name,
         features_dir=row.features_dir,
+        trident_run_id=row.trident_run_id,
         split_id=row.split_id,
         split_name=row.split_name,
+        split_dir_abs=row.split_dir_abs,
         mode=row.mode,
         in_dim=row.in_dim,
         n_proto_patches=row.n_proto_patches,
@@ -159,32 +57,16 @@ def _model_to_info(row: Model) -> ModelInfo:
         status=row.status,
         prototypes_dir=row.prototypes_dir,
         prototype_files=json.loads(row.prototype_files or "[]"),
+        is_favorite=row.is_favorite,
+        viz_status=row.viz_status,
+        preview_slide_ids=json.loads(row.preview_slide_ids) if row.preview_slide_ids else None,
+        preview_heatmap_paths=(
+            json.loads(row.preview_heatmap_paths) if row.preview_heatmap_paths else None
+        ),
+        topk_grid_path=row.topk_grid_path,
+        topk_per_proto=row.topk_per_proto,
+        umap_path=row.umap_path,
     )
-
-
-@router.get("/models", response_model=list[ModelInfo])
-def list_models(
-    group_id: str | None = Query(None),
-    dataset_name: str | None = Query(None),
-    db: Session = Depends(get_db),
-) -> list[ModelInfo]:
-    q = db.query(Model).order_by(Model.created_at.desc(), Model.fold_index.asc())
-    if group_id:
-        q = q.filter(Model.group_id == group_id)
-    if dataset_name:
-        q = q.filter(Model.dataset_name == dataset_name)
-    return [_model_to_info(r) for r in q.all()]
-
-
-@router.get("/runs", response_model=list[PantherRunInfo])
-def list_runs(
-    group_id: str | None = Query(None),
-    db: Session = Depends(get_db),
-) -> list[PantherRunInfo]:
-    q = db.query(PantherRun).order_by(PantherRun.created_at.desc(), PantherRun.fold_index.asc())
-    if group_id:
-        q = q.filter(PantherRun.group_id == group_id)
-    return [_run_to_info(r) for r in q.all()]
 
 
 def _run_to_info(row: PantherRun) -> PantherRunInfo:
@@ -212,56 +94,40 @@ def _run_to_info(row: PantherRun) -> PantherRunInfo:
     )
 
 
-# --- K-fold training ------------------------------------------------------
-
-
-def _resolve_or_create_split(
-    payload: PantherKFoldRunRequest, db: Session
-) -> Split:
-    if payload.split_name:
-        row = db.query(Split).filter(Split.split_name == payload.split_name).one_or_none()
-        if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Unknown split_name: {payload.split_name!r}",
-            )
-        if row.dataset_name != payload.dataset_name:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"split_name {payload.split_name!r} belongs to dataset "
-                    f"{row.dataset_name!r}, not {payload.dataset_name!r}."
-                ),
-            )
-        return row
-
-    if not payload.source_csv or not payload.k or payload.split_seed is None:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Provide either split_name OR (source_csv + k + split_seed) to create a new split.",
-        )
-    source_csv = resolve_within_roots(payload.source_csv)
-    if not source_csv.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="source_csv must be an existing file.",
-        )
-    return _create_split_record(
-        db,
-        dataset_name=payload.dataset_name,
-        source_csv=source_csv,
-        k=payload.k,
-        seed=payload.split_seed,
-    )
-
-
-@router.post("/run", response_model=PantherKFoldRunResponse)
-def start_run(
-    payload: PantherKFoldRunRequest,
-    response: Response,
+@router.get("/runs", response_model=list[PantherRunInfo])
+def list_runs(
+    group_id: str | None = Query(None),
     db: Session = Depends(get_db),
-) -> PantherKFoldRunResponse:
-    repo_path = _require_panther_repo()
+) -> list[PantherRunInfo]:
+    q = db.query(PantherRun).order_by(PantherRun.created_at.desc(), PantherRun.fold_index.asc())
+    if group_id:
+        q = q.filter(PantherRun.group_id == group_id)
+    return [_run_to_info(r) for r in q.all()]
+
+
+@router.get("/models", response_model=list[ModelInfo])
+def list_models(
+    group_id: str | None = Query(None),
+    dataset_name: str | None = Query(None),
+    db: Session = Depends(get_db),
+) -> list[ModelInfo]:
+    q = db.query(Model).order_by(Model.created_at.desc(), Model.fold_index.asc())
+    if group_id:
+        q = q.filter(Model.group_id == group_id)
+    if dataset_name:
+        q = q.filter(Model.dataset_name == dataset_name)
+    return [_model_to_info(r) for r in q.all()]
+
+
+@router.post("/runs", response_model=PantherKFoldStartResponse)
+def start_run(
+    payload: PantherKFoldRunRequest, db: Session = Depends(get_db)
+) -> PantherKFoldStartResponse:
+    if not settings.panther_repo_path:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="PANTHER_REPO_PATH is not set on the server.",
+        )
 
     features_dir = resolve_within_roots(payload.features_dir)
     if not features_dir.is_dir():
@@ -270,26 +136,61 @@ def start_run(
             detail="features_dir must be an existing directory.",
         )
 
-    split = _resolve_or_create_split(payload, db)
-    group_id = str(uuid.uuid4())
-    outcomes: list[FoldOutcome] = []
+    split = db.get(Split, payload.split_id)
+    if split is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown split_id: {payload.split_id!r}",
+        )
+    if split.dataset_name != payload.dataset_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"split_id {payload.split_id!r} belongs to dataset "
+                f"{split.dataset_name!r}, not {payload.dataset_name!r}."
+            ),
+        )
 
+    trident_run_id = _resolve_trident_run_id(db, features_dir)
+
+    group_id = str(uuid.uuid4())
+    db.add(
+        ModelGroup(
+            id=group_id,
+            created_at=datetime.utcnow(),
+            display_name=payload.model_name,
+            dataset_name=payload.dataset_name,
+            trident_run_id=trident_run_id,
+            k=split.k,
+            split_id=split.id,
+        )
+    )
+
+    model_ids: list[str] = []
     for i in range(split.k):
+        model_id = str(uuid.uuid4())
         rand8 = secrets.token_hex(4)
         model_name = f"{payload.model_name}_k{i}_{rand8}"
-        model_id = str(uuid.uuid4())
-        run_id = str(uuid.uuid4())
-
-        split_dir_rel = panther_runner.fold_dir_rel(payload.dataset_name, split.split_name, i)
         fold_abs = panther_runner.fold_dir_abs(
-            repo_path, payload.dataset_name, split.split_name, i
+            settings.panther_repo_path, payload.dataset_name, split.split_name, i
         )
         prototypes_dir = fold_abs / "prototypes"
-
-        cmd = panther_runner.build_command(
-            panther_runner.PantherFoldArgs(
+        db.add(
+            Model(
+                id=model_id,
+                created_at=datetime.utcnow(),
+                base_name=payload.model_name,
+                model_name=model_name,
+                display_name=payload.model_name,
+                group_id=group_id,
+                fold_index=i,
+                fold_k=split.k,
+                dataset_name=payload.dataset_name,
                 features_dir=str(features_dir),
-                split_dir_rel=split_dir_rel,
+                trident_run_id=trident_run_id,
+                split_id=split.id,
+                split_name=split.split_name,
+                split_dir_abs=str(fold_abs),
                 mode=payload.mode,
                 in_dim=payload.in_dim,
                 n_proto_patches=payload.n_proto_patches,
@@ -297,114 +198,42 @@ def start_run(
                 n_init=payload.n_init,
                 seed=payload.seed,
                 num_workers=payload.num_workers,
-            )
-        )
-        command_str = panther_runner.render_command(cmd)
-
-        model_row = Model(
-            id=model_id,
-            created_at=datetime.utcnow(),
-            base_name=payload.model_name,
-            model_name=model_name,
-            group_id=group_id,
-            fold_index=i,
-            fold_k=split.k,
-            dataset_name=payload.dataset_name,
-            features_dir=str(features_dir),
-            split_id=split.id,
-            split_name=split.split_name,
-            mode=payload.mode,
-            in_dim=payload.in_dim,
-            n_proto_patches=payload.n_proto_patches,
-            n_proto=payload.n_proto,
-            n_init=payload.n_init,
-            seed=payload.seed,
-            num_workers=payload.num_workers,
-            status="running",
-            prototypes_dir=str(prototypes_dir),
-        )
-        run_row = PantherRun(
-            id=run_id,
-            created_at=datetime.utcnow(),
-            group_id=group_id,
-            fold_index=i,
-            model_id=model_id,
-            dataset_name=payload.dataset_name,
-            features_dir=str(features_dir),
-            split_name=split.split_name,
-            mode=payload.mode,
-            in_dim=payload.in_dim,
-            n_proto_patches=payload.n_proto_patches,
-            n_proto=payload.n_proto,
-            n_init=payload.n_init,
-            seed=payload.seed,
-            num_workers=payload.num_workers,
-            command=command_str,
-            status="running",
-        )
-        db.add(model_row)
-        db.add(run_row)
-        db.commit()
-
-        result = panther_runner.execute(
-            cmd, cwd=panther_runner.panther_src_dir(repo_path)
-        )
-
-        run_row.stdout = result.stdout
-        run_row.stderr = result.stderr
-        run_row.return_code = result.returncode
-
-        prototype_files: list[str] = []
-        if result.returncode == 0:
-            prototype_files = panther_runner.scan_prototype_files(prototypes_dir)
-            if prototype_files:
-                model_status = "ready"
-            else:
-                model_status = "failed"
-        else:
-            model_status = "failed"
-
-        model_row.status = model_status
-        model_row.prototype_files = json.dumps(prototype_files)
-        run_row.status = "succeeded" if result.returncode == 0 else "failed"
-
-        db.add(model_row)
-        db.add(run_row)
-        db.commit()
-
-        outcomes.append(
-            FoldOutcome(
-                fold_index=i,
-                model_id=model_id,
-                model_name=model_name,
-                status=model_status,
+                status="running",
                 prototypes_dir=str(prototypes_dir),
-                prototype_files=prototype_files,
-                return_code=result.returncode,
-                stderr_tail=_tail(result.stderr, 2000),
+                viz_status="pending",
             )
         )
+        model_ids.append(model_id)
+    db.commit()
 
-        panther_runner.between_folds_cleanup()
+    job = enqueue_job(db, job_type="panther_train", ref_table="model_groups", ref_id=group_id)
 
-    succeeded = sum(1 for o in outcomes if o.status == "ready")
-    failed = len(outcomes) - succeeded
-    if succeeded == 0:
-        response.status_code = status.HTTP_500_INTERNAL_SERVER_ERROR
-    elif failed > 0:
-        response.status_code = status.HTTP_207_MULTI_STATUS
-
-    return PantherKFoldRunResponse(
+    return PantherKFoldStartResponse(
         group_id=group_id,
+        job_id=job.id,
+        k=split.k,
         split_id=split.id,
         split_name=split.split_name,
-        k=split.k,
-        models=outcomes,
-        summary=KFoldRunSummary(total=len(outcomes), succeeded=succeeded, failed=failed),
+        model_ids=model_ids,
     )
 
 
-def _tail(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    return "…" + text[-max_chars:]
+def _resolve_trident_run_id(db: Session, features_dir: Path) -> str | None:
+    """Optionally bind the new model_group to its parent TRIDENT run.
+
+    Mirrors /api/runs/resolve but returns None on miss instead of 400, so that
+    PANTHER training isn't blocked when features were produced outside Bagheera.
+    """
+    target = str(features_dir)
+    rows = db.query(TridentRun).all()
+    matches = []
+    for row in rows:
+        try:
+            candidate = str(Path(row.output_dir).expanduser().resolve())
+        except OSError:
+            continue
+        if candidate == target:
+            matches.append(row)
+    if len(matches) == 1:
+        return matches[0].id
+    return None

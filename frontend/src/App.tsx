@@ -2,6 +2,8 @@ import { BrowserRouter, NavLink, Navigate, Route, Routes } from 'react-router-do
 import TridentTrainingPage from './pages/TridentTrainingPage';
 import PantherTrainingPage from './pages/PantherTrainingPage';
 import ModelsBrowserPage from './pages/ModelsBrowserPage';
+import GroupDetailPage from './pages/GroupDetailPage';
+import InferencePage from './pages/InferencePage';
 
 export default function App() {
   return (
@@ -26,6 +28,8 @@ export default function App() {
             <Route path="/training/trident" element={<TridentTrainingPage />} />
             <Route path="/training/panther" element={<PantherTrainingPage />} />
             <Route path="/models" element={<ModelsBrowserPage />} />
+            <Route path="/models/:groupId" element={<GroupDetailPage />} />
+            <Route path="/models/:modelId/inference" element={<InferencePage />} />
             <Route path="*" element={<Navigate to="/training/trident" replace />} />
           </Routes>
         </main>

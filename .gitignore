@@ -26,6 +26,16 @@ dist/
 # TRIDENT output
 trident_processed/
 
+# Bagheera runtime artifacts (cached viz, per-inference outputs, job logs)
+viz_cache/
+inference_outputs/
+
+# Third-party repo checkouts referenced by env vars (TRIDENT, PANTHER, etc.)
+repos/
+
+# TypeScript build cache
+*.tsbuildinfo
+
 # Editor / OS
 .DS_Store
 .idea/

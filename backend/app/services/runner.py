@@ -9,8 +9,6 @@ from pathlib import Path
 
 from app.models.schemas import DATASET_NAME_PATTERN
 
-# TODO: switch to async background task with status polling.
-
 BACKEND_DIR = Path(__file__).resolve().parents[2]
 WRAPPER_SCRIPT = BACKEND_DIR / "scripts" / "run_trident.sh"
 
@@ -24,8 +22,12 @@ ENCODER_PATCH_SIZE: dict[str, int] = {
 }
 
 MAGNIFICATION = 20
-TASK = "feat"
+TASK = "all"
 JOB_DIR_ROOT = "./trident_processed"
+
+# NOTE: this synchronous TRIDENT runner is for the initial dataset build
+# (one user request → one TRIDENT run). The inference-time TRIDENT path is
+# async via services/inference_job.py and goes through the worker thread.
 
 
 def patch_size_for(encoder: str) -> int:

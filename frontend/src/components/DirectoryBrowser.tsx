@@ -4,24 +4,32 @@ import { ApiError, getRoots, listDirectory, type FsEntry } from '../lib/api';
 
 type Mode = 'dir' | 'file';
 
-interface Props {
+interface BaseProps {
   open: boolean;
   initialPath?: string;
   mode?: Mode;
   /** When mode='file', only files whose extension (lowercase, leading dot) matches one of these is shown. */
   extensions?: string[];
   onCancel: () => void;
-  onSelect: (path: string) => void;
 }
 
-export default function DirectoryBrowser({
-  open,
-  initialPath,
-  mode = 'dir',
-  extensions,
-  onCancel,
-  onSelect,
-}: Props) {
+interface SingleSelectProps extends BaseProps {
+  onSelect: (path: string) => void;
+  onSelectMulti?: never;
+}
+
+interface MultiSelectProps extends BaseProps {
+  onSelectMulti: (paths: string[]) => void;
+  onSelect?: never;
+  mode?: 'file'; // multi only meaningful for files
+}
+
+type Props = SingleSelectProps | MultiSelectProps;
+
+export default function DirectoryBrowser(props: Props) {
+  const { open, initialPath, mode = 'dir', extensions, onCancel } = props;
+  const multi = 'onSelectMulti' in props && typeof props.onSelectMulti === 'function';
+
   const [roots, setRoots] = useState<string[]>([]);
   const [currentRoot, setCurrentRoot] = useState<string | null>(null);
   const [path, setPath] = useState<string | null>(null);
@@ -31,6 +39,7 @@ export default function DirectoryBrowser({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState(0);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
 
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -79,13 +88,13 @@ export default function DirectoryBrowser({
   useEffect(() => {
     if (!open) return;
     previouslyFocused.current = document.activeElement as HTMLElement | null;
+    setSelected(new Set());
     let cancelled = false;
     (async () => {
       try {
         const rootRes = await getRoots();
         if (cancelled) return;
         setRoots(rootRes.roots);
-        // For file mode, if initialPath points at a file, navigate to its parent dir.
         let seed = initialPath || rootRes.roots[0];
         if (mode === 'file' && initialPath && /\.[^/]+$/.test(initialPath)) {
           const slash = initialPath.lastIndexOf('/');
@@ -122,6 +131,8 @@ export default function DirectoryBrowser({
   }, [path]);
 
   const highlightedEntry = entries[highlight];
+
+  // Single-select target.
   const selectablePath: string | null =
     mode === 'dir'
       ? path
@@ -129,8 +140,26 @@ export default function DirectoryBrowser({
         ? highlightedEntry.path
         : null;
 
+  const toggleSelected = (p: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(p)) next.delete(p);
+      else next.add(p);
+      return next;
+    });
+  };
+
   const confirm = () => {
-    if (selectablePath) onSelect(selectablePath);
+    if (multi) {
+      const paths = Array.from(selected).sort();
+      if (paths.length > 0 && 'onSelectMulti' in props && props.onSelectMulti) {
+        props.onSelectMulti(paths);
+      }
+    } else {
+      if (selectablePath && 'onSelect' in props && props.onSelect) {
+        props.onSelect(selectablePath);
+      }
+    }
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
@@ -141,12 +170,20 @@ export default function DirectoryBrowser({
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      // In file mode, Enter on a directory navigates into it; on a file, confirms.
+      // In multi mode, Enter on a directory navigates into it; on a file, toggle selection.
+      // In single mode (existing behavior), Enter on a file confirms.
       if (mode === 'file' && highlightedEntry?.is_dir) {
         void navigate(highlightedEntry.path);
+      } else if (multi && highlightedEntry && !highlightedEntry.is_dir) {
+        toggleSelected(highlightedEntry.path);
       } else {
         confirm();
       }
+      return;
+    }
+    if (e.key === ' ' && multi && highlightedEntry && !highlightedEntry.is_dir) {
+      e.preventDefault();
+      toggleSelected(highlightedEntry.path);
       return;
     }
     if (e.key === 'ArrowDown') {
@@ -176,8 +213,17 @@ export default function DirectoryBrowser({
 
   if (!open) return null;
 
-  const title = mode === 'file' ? 'Choose a file' : 'Choose a directory';
-  const buttonLabel = mode === 'file' ? 'Select this file' : 'Select this folder';
+  const title = multi
+    ? 'Choose files'
+    : mode === 'file'
+      ? 'Choose a file'
+      : 'Choose a directory';
+  const buttonLabel = multi
+    ? `Select ${selected.size} file${selected.size === 1 ? '' : 's'}`
+    : mode === 'file'
+      ? 'Select this file'
+      : 'Select this folder';
+  const confirmDisabled = multi ? selected.size === 0 : !selectablePath;
 
   return createPortal(
     <div
@@ -258,31 +304,56 @@ export default function DirectoryBrowser({
             </p>
           ) : (
             <ul ref={listRef} role="listbox">
-              {entries.map((entry, i) => (
-                <li
-                  key={entry.path}
-                  role="option"
-                  aria-selected={i === highlight}
-                  onClick={() => setHighlight(i)}
-                  onDoubleClick={() => {
-                    if (entry.is_dir) void navigate(entry.path);
-                    else if (mode === 'file') onSelect(entry.path);
-                  }}
-                  className={`flex cursor-pointer items-center gap-2 rounded px-3 py-2 text-sm ${
-                    i === highlight ? 'bg-slate-200 text-slate-900' : 'text-slate-700 hover:bg-slate-100'
-                  }`}
-                >
-                  {entry.is_dir ? <FolderIcon /> : <FileIcon />}
-                  <span>{entry.name}</span>
-                </li>
-              ))}
+              {entries.map((entry, i) => {
+                const isChecked = multi && !entry.is_dir && selected.has(entry.path);
+                return (
+                  <li
+                    key={entry.path}
+                    role="option"
+                    aria-selected={i === highlight}
+                    onClick={() => {
+                      setHighlight(i);
+                      if (multi && !entry.is_dir) toggleSelected(entry.path);
+                    }}
+                    onDoubleClick={() => {
+                      if (entry.is_dir) void navigate(entry.path);
+                      else if (!multi && mode === 'file' && 'onSelect' in props && props.onSelect) {
+                        props.onSelect(entry.path);
+                      }
+                    }}
+                    className={`flex cursor-pointer items-center gap-2 rounded px-3 py-2 text-sm ${
+                      i === highlight ? 'bg-slate-200 text-slate-900' : 'text-slate-700 hover:bg-slate-100'
+                    }`}
+                  >
+                    {multi && !entry.is_dir ? (
+                      <input
+                        type="checkbox"
+                        checked={isChecked}
+                        onChange={() => toggleSelected(entry.path)}
+                        onClick={(e) => e.stopPropagation()}
+                        className="h-4 w-4 rounded border-slate-300"
+                      />
+                    ) : null}
+                    {entry.is_dir ? <FolderIcon /> : <FileIcon />}
+                    <span>{entry.name}</span>
+                  </li>
+                );
+              })}
             </ul>
           )}
         </div>
 
         <div className="border-t border-slate-200 bg-slate-50 px-5 py-3">
-          <div className="text-xs text-slate-500">Selected</div>
-          <div className="truncate font-mono text-sm text-slate-800">{selectablePath ?? '—'}</div>
+          <div className="text-xs text-slate-500">
+            {multi ? 'Selected files' : 'Selected'}
+          </div>
+          <div className="truncate font-mono text-sm text-slate-800">
+            {multi
+              ? selected.size === 0
+                ? '—'
+                : `${selected.size} file${selected.size === 1 ? '' : 's'}`
+              : (selectablePath ?? '—')}
+          </div>
           <div className="mt-3 flex justify-end gap-2">
             <button
               type="button"
@@ -294,7 +365,7 @@ export default function DirectoryBrowser({
             <button
               type="button"
               onClick={confirm}
-              disabled={!selectablePath}
+              disabled={confirmDisabled}
               className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {buttonLabel}

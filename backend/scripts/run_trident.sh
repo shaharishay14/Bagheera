@@ -7,7 +7,7 @@
 #   TRIDENT_PYTHON      python interpreter to use (default: python)
 #
 # Expected args (all required):
-#   --task <feat>
+#   --task <all|seg|coords|feat>
 #   --wsi_dir <path>
 #   --job_dir <path>
 #   --patch_encoder <uni_v1|uni_v2|phikon|phikon_v2>

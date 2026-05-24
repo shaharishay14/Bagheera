@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useNavigate } from 'react-router-dom';
 import DirectoryBrowser from './DirectoryBrowser';
 import {
   ApiError,
+  createSplit,
   getCsvRowCount,
   listSplits,
-  startPantherRun,
-  type PantherKFoldRunResponse,
+  resolveFeaturesDir,
+  startPantherKFoldRun,
   type PantherMode,
+  type RunResolveResponse,
   type SplitInfo,
 } from '../lib/api';
 
@@ -23,13 +25,11 @@ interface PantherFormState {
   // create-new fields
   sourceCsv: string;
   k: number;
-  // existing fields
-  existingSplitName: string;
-  // seeds — fully independent. splitSeed is only used when CREATING a split (deterministic
-  // shuffle). pantherSeed is the PANTHER --seed (k-means/faiss init) and applies in both modes.
   splitSeed: number;
-  pantherSeed: number;
+  // existing-split fields
+  selectedSplitId: string;
   // hyperparameters
+  pantherSeed: number;
   mode: PantherMode;
   inDim: number;
   nProtoPatches: number;
@@ -44,8 +44,8 @@ const INITIAL: PantherFormState = {
   splitMode: 'create',
   sourceCsv: '',
   k: 5,
-  existingSplitName: '',
-  splitSeed: 1,
+  splitSeed: 42,
+  selectedSplitId: '',
   pantherSeed: 1,
   mode: 'faiss',
   inDim: 1024,
@@ -61,10 +61,7 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
-function buildCommandPreview(
-  s: PantherFormState,
-  splitDirRel: string,
-): string {
+function buildCommandPreview(s: PantherFormState, splitDirRel: string): string {
   const features = shellQuote(s.featuresDir.trim() || '<features_dir>');
   return [
     'CUDA_VISIBLE_DEVICES=0 python -m training.main_prototype',
@@ -81,51 +78,92 @@ function buildCommandPreview(
   ].join(' \\\n  ');
 }
 
-function splitDirRelPreview(state: PantherFormState, splits: SplitInfo[]): string {
-  if (state.splitMode === 'existing') {
-    const picked = splits.find((s) => s.split_name === state.existingSplitName);
-    if (!picked) return 'datasets_splits/<dataset>/<split>/k=<i>';
-    return `datasets_splits/${picked.dataset_name}/${picked.split_name}/k=<i>`;
-  }
-  const ds = state.modelName || '<model_name>';
-  return `datasets_splits/${ds}/<auto>/k=<i>`;
-}
-
 export default function PantherForm() {
+  const navigate = useNavigate();
   const [state, setState] = useState<PantherFormState>(INITIAL);
   const [modelTouched, setModelTouched] = useState(false);
   const [browser, setBrowser] = useState<null | 'features' | 'source'>(null);
-  const [submitting, setSubmitting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<PantherKFoldRunResponse | null>(null);
-  const [copied, setCopied] = useState(false);
+
+  // resolve features_dir → trident_run
+  const [resolved, setResolved] = useState<RunResolveResponse | null>(null);
+  const [resolveError, setResolveError] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
+
+  // splits for the resolved dataset
+  const [splits, setSplits] = useState<SplitInfo[]>([]);
+  const [splitsError, setSplitsError] = useState<string | null>(null);
+  const [splitsLoading, setSplitsLoading] = useState(false);
+
+  // source CSV row count (create-new mode)
   const [sourceRows, setSourceRows] = useState<number | null>(null);
   const [rowsLoading, setRowsLoading] = useState(false);
   const [rowsError, setRowsError] = useState<string | null>(null);
-  const [splits, setSplits] = useState<SplitInfo[]>([]);
-  const [splitsError, setSplitsError] = useState<string | null>(null);
+
+  // create-split action
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+
+  // submit (training)
+  const [submitting, setSubmitting] = useState(false);
+  const [submitError, setSubmitError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
 
   const update = <K extends keyof PantherFormState>(key: K, value: PantherFormState[K]) =>
     setState((prev) => ({ ...prev, [key]: value }));
 
+  // Resolve features_dir → trident_run + dataset_name
   useEffect(() => {
+    const dir = state.featuresDir.trim();
+    setResolved(null);
+    setResolveError(null);
+    if (!dir) return;
     let cancelled = false;
+    setResolving(true);
     (async () => {
       try {
-        const res = await listSplits();
+        const r = await resolveFeaturesDir(dir);
+        if (!cancelled) setResolved(r);
+      } catch (err) {
+        if (!cancelled) {
+          const msg = err instanceof ApiError ? err.message : 'Failed to resolve features directory.';
+          setResolveError(msg);
+        }
+      } finally {
+        if (!cancelled) setResolving(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [state.featuresDir]);
+
+  // Load splits for the resolved dataset
+  useEffect(() => {
+    setSplits([]);
+    setSplitsError(null);
+    setState((s) => ({ ...s, selectedSplitId: '' }));
+    if (!resolved) return;
+    let cancelled = false;
+    setSplitsLoading(true);
+    (async () => {
+      try {
+        const res = await listSplits(resolved.dataset_name);
         if (!cancelled) setSplits(res);
       } catch (err) {
         if (!cancelled) {
           const msg = err instanceof ApiError ? err.message : 'Failed to load splits.';
           setSplitsError(msg);
         }
+      } finally {
+        if (!cancelled) setSplitsLoading(false);
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [resolved]);
 
+  // Count source CSV rows (create-new mode)
   useEffect(() => {
     setSourceRows(null);
     setRowsError(null);
@@ -151,19 +189,22 @@ export default function PantherForm() {
     };
   }, [state.sourceCsv, state.splitMode]);
 
-  const splitDirRel = useMemo(() => splitDirRelPreview(state, splits), [state, splits]);
-  const commandPreview = useMemo(() => buildCommandPreview(state, splitDirRel), [state, splitDirRel]);
-
-  const pickedExistingSplit = useMemo(
-    () =>
-      state.splitMode === 'existing'
-        ? splits.find((s) => s.split_name === state.existingSplitName) ?? null
-        : null,
-    [state.splitMode, state.existingSplitName, splits],
+  const selectedSplit = useMemo(
+    () => splits.find((s) => s.id === state.selectedSplitId) ?? null,
+    [splits, state.selectedSplitId],
   );
 
-  // K used for the submit-button label and helper text.
-  const effectiveK = pickedExistingSplit?.k ?? state.k;
+  const splitDirRel = useMemo(() => {
+    if (selectedSplit) {
+      return `datasets_splits/${selectedSplit.dataset_name}/${selectedSplit.split_name}/k=<i>`;
+    }
+    const ds = resolved?.dataset_name ?? '<dataset>';
+    return `datasets_splits/${ds}/<split>/k=<i>`;
+  }, [selectedSplit, resolved]);
+
+  const commandPreview = useMemo(() => buildCommandPreview(state, splitDirRel), [state, splitDirRel]);
+
+  const effectiveK = selectedSplit?.k ?? state.k;
 
   // --- validation ---------------------------------------------------------
   const modelError =
@@ -173,39 +214,17 @@ export default function PantherForm() {
         ? 'Only letters, digits, underscores, and hyphens are allowed.'
         : null;
 
-  const kError = state.splitMode === 'create' && state.k < 2 ? 'K must be ≥ 2.' : null;
+  const kError = state.splitMode === 'create' && state.k < 3 ? 'K must be ≥ 3.' : null;
   const splitSeedError =
     state.splitMode === 'create' && state.splitSeed < 0 ? 'Split seed must be ≥ 0.' : null;
-  const pantherSeedError = state.pantherSeed < 0 ? 'PANTHER seed must be ≥ 0.' : null;
   const csvError =
     state.splitMode === 'create' && !state.sourceCsv.trim() ? 'Source CSV is required.' : null;
-  const existingError =
-    state.splitMode === 'existing' && !state.existingSplitName
-      ? 'Pick an existing split.'
-      : null;
 
-  const formInvalid =
-    !!modelError ||
-    !state.modelName ||
-    !state.featuresDir.trim() ||
-    !!kError ||
-    !!splitSeedError ||
-    !!pantherSeedError ||
-    !!csvError ||
-    !!existingError;
+  const canCreateSplit =
+    !!resolved && state.splitMode === 'create' && !kError && !splitSeedError && !csvError;
 
-  // --- per-fold size hint (create mode) -----------------------------------
-  const foldHint = useMemo(() => {
-    if (state.splitMode !== 'create') return null;
-    if (sourceRows == null || kError) return null;
-    const k = state.k;
-    if (k < 2 || sourceRows < k) return null;
-    const base = Math.floor(sourceRows / k);
-    const test = base;
-    const val = base;
-    const train = sourceRows - test - val;
-    return { k, train, val, test, total: sourceRows };
-  }, [state.splitMode, sourceRows, state.k, kError]);
+  const submitInvalid =
+    !!modelError || !state.modelName || !resolved || !state.selectedSplitId || state.pantherSeed < 0;
 
   const onCopy = async () => {
     try {
@@ -217,74 +236,62 @@ export default function PantherForm() {
     }
   };
 
+  const onCreateSplit = async () => {
+    setCreateError(null);
+    if (!resolved || !canCreateSplit) return;
+    setCreating(true);
+    try {
+      const created = await createSplit({
+        dataset_name: resolved.dataset_name,
+        source_csv: state.sourceCsv.trim(),
+        k: state.k,
+        seed: state.splitSeed,
+      });
+      // Refresh the dropdown and switch to existing-split mode with the new split selected.
+      try {
+        const refreshed = await listSplits(resolved.dataset_name);
+        setSplits(refreshed);
+      } catch {
+        setSplits((prev) => [created, ...prev]);
+      }
+      setState((s) => ({ ...s, splitMode: 'existing', selectedSplitId: created.id }));
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : 'Failed to create split.';
+      setCreateError(msg);
+    } finally {
+      setCreating(false);
+    }
+  };
+
   const onSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setError(null);
-    setResult(null);
+    setSubmitError(null);
     setModelTouched(true);
-    if (formInvalid) {
-      setError(
-        modelError ??
-          kError ??
-          splitSeedError ??
-          pantherSeedError ??
-          csvError ??
-          existingError ??
-          'Form is invalid.',
+    if (submitInvalid || !resolved || !selectedSplit) {
+      setSubmitError(
+        modelError ?? 'Resolve a features directory and pick a split before training.',
       );
       return;
     }
-
     setSubmitting(true);
     try {
-      const datasetName =
-        state.splitMode === 'existing' && pickedExistingSplit
-          ? pickedExistingSplit.dataset_name
-          : state.modelName;
-      const payload =
-        state.splitMode === 'create'
-          ? {
-              model_name: state.modelName,
-              features_dir: state.featuresDir.trim(),
-              dataset_name: datasetName,
-              source_csv: state.sourceCsv.trim(),
-              k: state.k,
-              split_seed: state.splitSeed,
-              seed: state.pantherSeed,
-              mode: state.mode,
-              in_dim: state.inDim,
-              n_proto_patches: state.nProtoPatches,
-              n_proto: state.nProto,
-              n_init: state.nInit,
-              num_workers: state.numWorkers,
-            }
-          : {
-              model_name: state.modelName,
-              features_dir: state.featuresDir.trim(),
-              dataset_name: datasetName,
-              split_name: state.existingSplitName,
-              seed: state.pantherSeed,
-              mode: state.mode,
-              in_dim: state.inDim,
-              n_proto_patches: state.nProtoPatches,
-              n_proto: state.nProto,
-              n_init: state.nInit,
-              num_workers: state.numWorkers,
-            };
-      const run = await startPantherRun(payload);
-      setResult(run);
-      if (run.summary.succeeded === 0) {
-        setError(`All ${run.summary.total} folds failed.`);
-      }
-      // Refresh the splits list so a newly-created split appears.
-      try {
-        setSplits(await listSplits());
-      } catch {
-        // non-fatal
-      }
+      const res = await startPantherKFoldRun({
+        model_name: state.modelName,
+        features_dir: state.featuresDir.trim(),
+        dataset_name: resolved.dataset_name,
+        split_id: selectedSplit.id,
+        mode: state.mode,
+        in_dim: state.inDim,
+        n_proto_patches: state.nProtoPatches,
+        n_proto: state.nProto,
+        n_init: state.nInit,
+        seed: state.pantherSeed,
+        num_workers: state.numWorkers,
+      });
+      navigate(`/models/${encodeURIComponent(res.group_id)}`);
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : 'Failed to start run.';
-      setError(msg);
+      const msg = err instanceof ApiError ? err.message : 'Failed to start training.';
+      setSubmitError(msg);
     } finally {
       setSubmitting(false);
     }
@@ -295,8 +302,8 @@ export default function PantherForm() {
       <div className="mb-6">
         <h2 className="text-xl font-semibold text-slate-900">Prototype training with PANTHER</h2>
         <p className="text-sm text-slate-500">
-          Train K prototype models via K-fold cross-validation. Each form submission produces K
-          models from one PANTHER run group.
+          Train K prototype models via K-fold cross-validation. Each form submission queues one
+          training job for K folds. Returns immediately; watch progress on the Models page.
         </p>
       </div>
 
@@ -319,6 +326,19 @@ export default function PantherForm() {
               Browse…
             </button>
           </div>
+          {resolving ? (
+            <p className="mt-1 text-xs text-slate-500">Resolving…</p>
+          ) : resolveError ? (
+            <p className="mt-1 text-xs text-rose-600">{resolveError}</p>
+          ) : resolved ? (
+            <div className="mt-2 inline-flex items-center gap-2 rounded-full border border-emerald-300 bg-emerald-50 px-3 py-1 text-xs text-emerald-900">
+              <span className="font-medium">Dataset:</span>
+              <span className="font-mono">{resolved.dataset_name}</span>
+              <span className="text-emerald-700/60">
+                · {resolved.patch_encoder} · {resolved.mag}× · {resolved.patch_size}px
+              </span>
+            </div>
+          ) : null}
         </Field>
 
         <Field label="Model name" htmlFor="model_name">
@@ -352,13 +372,21 @@ export default function PantherForm() {
         </Field>
 
         <fieldset className="space-y-3">
-          <legend className="text-xs font-semibold uppercase tracking-wide text-slate-500">Dataset split</legend>
+          <legend className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            Dataset split
+          </legend>
+          {!resolved ? (
+            <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              You can configure the split now; creating or selecting one becomes
+              available once a features directory is resolved above.
+            </p>
+          ) : null}
           <div className="flex gap-2">
             <ToggleButton
               active={state.splitMode === 'create'}
               onClick={() => update('splitMode', 'create')}
             >
-              Create new split
+              Create new K-fold split
             </ToggleButton>
             <ToggleButton
               active={state.splitMode === 'existing'}
@@ -393,15 +421,17 @@ export default function PantherForm() {
                 ) : rowsError ? (
                   <p className="mt-1 text-xs text-rose-600">{rowsError}</p>
                 ) : sourceRows != null ? (
-                  <p className="mt-1 text-xs text-slate-500">{sourceRows.toLocaleString()} data rows.</p>
+                  <p className="mt-1 text-xs text-slate-500">
+                    {sourceRows.toLocaleString()} data rows.
+                  </p>
                 ) : null}
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <NumberInput
-                  label="K (number of folds)"
+                  label="K (folds)"
                   value={state.k}
-                  onChange={(v) => update('k', Math.max(2, Math.round(v)))}
-                  min={2}
+                  onChange={(v) => update('k', Math.max(3, Math.round(v)))}
+                  min={3}
                   step={1}
                 />
                 <NumberInput
@@ -412,47 +442,39 @@ export default function PantherForm() {
                   step={1}
                 />
               </div>
-              <p className="text-[11px] text-slate-500">
-                Split seed controls the deterministic shuffle when partitioning rows into folds.
-                It's stored on the saved split and never read again after creation. Unrelated to the
-                PANTHER <code className="font-mono">--seed</code> below.
-              </p>
               <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                K-fold CV produces K folds. With K={state.k}: each fold uses{' '}
-                {pctLabel((state.k - 2) / state.k)} train /{' '}
-                {pctLabel(1 / state.k)} val /{' '}
-                {pctLabel(1 / state.k)} test (1/K val, 1/K test, (K−2)/K train). Every slide appears
-                in test exactly once across folds.
+                K-fold CV produces K folds. With K={state.k}: each fold uses ~
+                {pctLabel((state.k - 2) / state.k)} train / {pctLabel(1 / state.k)} val /{' '}
+                {pctLabel(1 / state.k)} test. Every slide appears in test exactly once across folds.
               </p>
-              {foldHint ? (
-                <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  With {foldHint.total.toLocaleString()} source rows and K={foldHint.k}: ~
-                  {foldHint.train.toLocaleString()} train / {foldHint.val.toLocaleString()} val /{' '}
-                  {foldHint.test.toLocaleString()} test per fold.
-                </p>
+              {createError ? (
+                <p className="text-xs text-rose-600">{createError}</p>
               ) : null}
-              {kError || splitSeedError || csvError ? (
-                <ul className="space-y-1 text-xs text-rose-600">
-                  {kError ? <li>{kError}</li> : null}
-                  {splitSeedError ? <li>{splitSeedError}</li> : null}
-                  {csvError ? <li>{csvError}</li> : null}
-                </ul>
-              ) : null}
+              <button
+                type="button"
+                disabled={!canCreateSplit || creating}
+                onClick={onCreateSplit}
+                className="rounded-md border border-slate-900 bg-white px-3 py-1.5 text-sm font-medium text-slate-900 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {creating ? 'Creating split…' : 'Create split'}
+              </button>
             </div>
           ) : (
             <div className="space-y-3">
               {splitsError ? (
                 <p className="text-xs text-rose-600">{splitsError}</p>
+              ) : splitsLoading ? (
+                <p className="text-xs text-slate-500">Loading splits…</p>
               ) : splits.length === 0 ? (
                 <p className="rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
-                  No saved splits yet. Switch to <em>Create new split</em> to make one.
+                  No saved splits for this dataset yet. Switch to <em>Create new K-fold split</em>.
                 </p>
               ) : (
                 <Field label="Existing split" htmlFor="existing_split">
                   <select
                     id="existing_split"
-                    value={state.existingSplitName}
-                    onChange={(e) => update('existingSplitName', e.target.value)}
+                    value={state.selectedSplitId}
+                    onChange={(e) => update('selectedSplitId', e.target.value)}
                     className="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
                   >
                     <option value="">— select a split —</option>
@@ -462,25 +484,22 @@ export default function PantherForm() {
                         ? `train ${fold0.train} / val ${fold0.val} / test ${fold0.test}`
                         : 'sizes unknown';
                       return (
-                        <option key={s.id} value={s.split_name}>
-                          {s.split_name} — K={s.k}, {sizes}, dataset {s.dataset_name}
+                        <option key={s.id} value={s.id}>
+                          {s.split_name} — K={s.k}, {sizes}
                         </option>
                       );
                     })}
                   </select>
                 </Field>
               )}
-              {existingError ? (
-                <ul className="space-y-1 text-xs text-rose-600">
-                  <li>{existingError}</li>
-                </ul>
-              ) : null}
             </div>
           )}
         </fieldset>
 
         <fieldset className="space-y-3">
-          <legend className="text-xs font-semibold uppercase tracking-wide text-slate-500">PANTHER parameters</legend>
+          <legend className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+            PANTHER parameters
+          </legend>
           <div className="grid grid-cols-2 gap-3">
             <Field label="Mode" htmlFor="mode">
               <select
@@ -539,9 +558,9 @@ export default function PantherForm() {
               step={1}
             />
           </div>
-          {pantherSeedError ? (
-            <p className="text-xs text-rose-600">{pantherSeedError}</p>
-          ) : null}
+          <p className="text-[11px] text-slate-500">
+            in_dim depends on the patch encoder used in TRIDENT — UNI=1024, UNI2-h=1536, Phikon=768.
+          </p>
         </fieldset>
 
         <div>
@@ -561,17 +580,17 @@ export default function PantherForm() {
             {commandPreview}
           </pre>
           <p className="mt-1 text-xs text-slate-500">
-            Runs from <code className="font-mono">$PANTHER_REPO_PATH/src</code>. K models train
-            sequentially; this may take a while.
+            Runs from <code className="font-mono">$PANTHER_REPO_PATH/src</code>. The K commands are
+            executed sequentially by the worker thread.
           </p>
         </div>
 
-        {error ? (
+        {submitError ? (
           <div className="flex items-start justify-between gap-3 rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
-            <span className="whitespace-pre-wrap font-mono text-xs">{error}</span>
+            <span className="whitespace-pre-wrap font-mono text-xs">{submitError}</span>
             <button
               type="button"
-              onClick={() => setError(null)}
+              onClick={() => setSubmitError(null)}
               aria-label="Dismiss"
               className="text-rose-500 hover:text-rose-800"
             >
@@ -580,53 +599,12 @@ export default function PantherForm() {
           </div>
         ) : null}
 
-        {result ? (
-          <div
-            className={`rounded-md border px-4 py-3 text-sm ${
-              result.summary.failed === 0
-                ? 'border-emerald-200 bg-emerald-50 text-emerald-900'
-                : 'border-amber-200 bg-amber-50 text-amber-900'
-            }`}
-          >
-            <div className="font-medium">
-              Trained {result.summary.succeeded} / {result.summary.total} models
-              {result.summary.failed > 0 ? ` (${result.summary.failed} failed)` : ''}
-            </div>
-            <dl className="mt-2 space-y-1 text-xs">
-              <Row k="Group ID" v={result.group_id} />
-              <Row k="Split" v={`${result.split_name} (K=${result.k})`} />
-            </dl>
-            <ul className="mt-3 space-y-1 text-xs font-mono">
-              {result.models.map((m) => (
-                <li key={m.model_id} className="flex items-center gap-2">
-                  <span
-                    className={`inline-block w-14 shrink-0 rounded px-1.5 py-0.5 text-center text-[10px] uppercase tracking-wide ${
-                      m.status === 'ready'
-                        ? 'bg-emerald-200 text-emerald-900'
-                        : 'bg-rose-200 text-rose-900'
-                    }`}
-                  >
-                    k={m.fold_index}
-                  </span>
-                  <span className="flex-1 break-all">{m.model_name}</span>
-                  <span className="text-slate-500">{m.status}</span>
-                </li>
-              ))}
-            </ul>
-            <p className="mt-3 text-xs">
-              <Link to={`/models?group=${result.group_id}`} className="underline hover:no-underline">
-                View this run group in Models →
-              </Link>
-            </p>
-          </div>
-        ) : null}
-
         <button
           type="submit"
-          disabled={submitting || formInvalid}
+          disabled={submitting || submitInvalid}
           className="w-full rounded-md bg-slate-900 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
         >
-          {submitting ? `Training ${effectiveK} models…` : `Train ${effectiveK} Models`}
+          {submitting ? `Queuing ${effectiveK} models…` : `Train ${effectiveK} Models`}
         </button>
       </form>
 
@@ -721,7 +699,9 @@ function NumberInput({
 }) {
   return (
     <div className={className}>
-      <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">{label}</label>
+      <label className="mb-1 block text-xs font-medium uppercase tracking-wide text-slate-500">
+        {label}
+      </label>
       <input
         type="number"
         value={Number.isFinite(value) ? value : 0}
@@ -734,15 +714,6 @@ function NumberInput({
         }}
         className="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
       />
-    </div>
-  );
-}
-
-function Row({ k, v }: { k: string; v: string }) {
-  return (
-    <div className="flex gap-2">
-      <dt className="w-20 shrink-0 text-slate-600">{k}</dt>
-      <dd className="flex-1 break-all">{v}</dd>
     </div>
   );
 }
