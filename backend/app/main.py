@@ -16,6 +16,7 @@ from app.routes import (
     models,
     notes,
     panther,
+    queue,
     runs,
     splits,
     trident,
@@ -66,6 +67,7 @@ app.include_router(labels.router)
 app.include_router(notes.router)
 app.include_router(inference.router)
 app.include_router(jobs.router)
+app.include_router(queue.router)
 app.include_router(viz.router)
 
 

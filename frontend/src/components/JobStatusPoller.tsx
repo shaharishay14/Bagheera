@@ -113,6 +113,7 @@ function StatusBadge({ status }: { status: JobInfo['status'] }) {
     running: 'bg-blue-50 text-blue-800 border-blue-200 animate-pulse',
     succeeded: 'bg-emerald-50 text-emerald-800 border-emerald-200',
     failed: 'bg-rose-50 text-rose-800 border-rose-200',
+    canceled: 'bg-amber-50 text-amber-800 border-amber-200',
   };
   return (
     <span

@@ -628,7 +628,7 @@ export function getCsvRowCount(path: string): Promise<{ rows: number }> {
 
 // --- Jobs -----------------------------------------------------------------
 
-export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed';
+export type JobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'canceled';
 export type JobType = 'panther_train' | 'post_train_viz' | 'inference';
 
 export interface JobInfo {
@@ -642,6 +642,7 @@ export interface JobInfo {
   status: JobStatus;
   error_message: string | null;
   log_path: string | null;
+  queue_position: number | null;
 }
 
 export interface JobDetail extends JobInfo {
@@ -671,4 +672,42 @@ export function getJob(jobId: string): Promise<JobDetail> {
 
 export function retryJob(jobId: string): Promise<JobInfo> {
   return request(`/api/jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST' });
+}
+
+export function cancelJob(jobId: string): Promise<JobInfo> {
+  return request(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, { method: 'POST' });
+}
+
+// --- Queue ----------------------------------------------------------------
+
+export interface JobView {
+  id: string;
+  job_type: JobType;
+  status: JobStatus;
+  ref_table: string;
+  ref_id: string;
+  queue_position: number | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+  error_message: string | null;
+  title: string;
+  subtitle: string | null;
+}
+
+export interface QueueResponse {
+  running: JobView | null;
+  waiting: JobView[];
+  recent: JobView[];
+}
+
+export function getQueue(): Promise<QueueResponse> {
+  return request('/api/queue');
+}
+
+export function reorderQueue(orderedJobIds: string[]): Promise<QueueResponse> {
+  return request('/api/queue/reorder', {
+    method: 'POST',
+    body: JSON.stringify({ ordered_job_ids: orderedJobIds }),
+  });
 }

@@ -22,7 +22,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Protocol
 
-from sqlalchemy import asc
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -75,23 +75,49 @@ def _log_path_for(job_id: str) -> Path:
     return settings.viz_cache_root / "job_logs" / f"{job_id}.log"
 
 
-def _claim_next_job(db: Session) -> Job | None:
-    job = (
-        db.query(Job)
-        .filter(Job.status == "queued")
-        .order_by(asc(Job.created_at))
-        .first()
+def next_queue_position(db: Session) -> int:
+    """Tail position for a newly queued / re-queued job (FIFO)."""
+    max_pos = (
+        db.query(func.max(Job.queue_position)).filter(Job.status == "queued").scalar()
     )
-    if job is None:
-        return None
-    job.status = "running"
-    job.started_at = datetime.utcnow()
-    if not job.log_path:
-        job.log_path = str(_log_path_for(job.id))
-    db.add(job)
-    db.commit()
-    db.refresh(job)
-    return job
+    return int(max_pos or 0) + 1
+
+
+def _claim_next_job(db: Session) -> Job | None:
+    """Claim the lowest-position queued job via compare-and-swap.
+
+    If a user cancels the chosen job between the select and the claim, the
+    conditional UPDATE matches 0 rows and we move on to the next one. This is
+    what keeps cancel-vs-start races consistent without locks.
+    """
+    while True:
+        job = (
+            db.query(Job)
+            .filter(Job.status == "queued")
+            .order_by(Job.queue_position.asc(), Job.created_at.asc())
+            .first()
+        )
+        if job is None:
+            return None
+        log_path = job.log_path or str(_log_path_for(job.id))
+        claimed = (
+            db.query(Job)
+            .filter(Job.id == job.id, Job.status == "queued")
+            .update(
+                {
+                    "status": "running",
+                    "started_at": datetime.utcnow(),
+                    "queue_position": None,
+                    "log_path": log_path,
+                },
+                synchronize_session=False,
+            )
+        )
+        db.commit()
+        if claimed == 1:
+            db.refresh(job)
+            return job
+        # Lost the race (job canceled just now) — try the next queued job.
 
 
 def _run_one_job(job: Job) -> None:
@@ -194,6 +220,7 @@ def enqueue_job(
         ref_id=ref_id,
         status="queued",
         log_path=str(_log_path_for(job_id)),
+        queue_position=next_queue_position(db),
     )
     db.add(job)
     db.commit()

@@ -286,3 +286,6 @@ class Job(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="queued", index=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     log_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # Order among waiting (queued) jobs; lower runs sooner. NULL once the job
+    # leaves the queue (running/terminal). Assigned FIFO on enqueue.
+    queue_position: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)

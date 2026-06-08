@@ -423,7 +423,7 @@ class FsCsvCountResponse(BaseModel):
 # --- Jobs ----------------------------------------------------------------
 
 JobType = Literal["panther_train", "post_train_viz", "inference"]
-JobStatus = Literal["queued", "running", "succeeded", "failed"]
+JobStatus = Literal["queued", "running", "succeeded", "failed", "canceled"]
 
 
 class JobInfo(BaseModel):
@@ -437,9 +437,42 @@ class JobInfo(BaseModel):
     status: str
     error_message: Optional[str]
     log_path: Optional[str]
+    queue_position: Optional[int] = None
 
     model_config = {"from_attributes": True}
 
 
 class JobDetail(JobInfo):
     log_tail: str = ""
+
+
+# --- Queue ---------------------------------------------------------------
+
+
+class JobView(BaseModel):
+    """A job enriched with a human-readable title/subtitle for the Queue page."""
+
+    id: str
+    job_type: str
+    status: str
+    ref_table: str
+    ref_id: str
+    queue_position: Optional[int]
+    created_at: datetime
+    started_at: Optional[datetime]
+    finished_at: Optional[datetime]
+    error_message: Optional[str]
+    title: str
+    subtitle: Optional[str] = None
+
+
+class QueueResponse(BaseModel):
+    running: Optional[JobView]
+    waiting: list[JobView]
+    recent: list[JobView]
+
+
+class QueueReorderRequest(BaseModel):
+    # Desired order of the waiting jobs (front first). Ids no longer queued
+    # are ignored; queued ids omitted here are appended after, prior order kept.
+    ordered_job_ids: list[str]
