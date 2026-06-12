@@ -9,15 +9,21 @@ import QueuePage from './pages/QueuePage';
 export default function App() {
   return (
     <BrowserRouter>
-      <div className="min-h-screen bg-slate-50 text-slate-900">
-        <header className="border-b border-slate-200 bg-white">
-          <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-4">
-            <h1 className="text-lg font-semibold tracking-tight">Bagheera</h1>
-            <nav className="flex items-center gap-1 text-sm">
-              <span className="mr-2 text-slate-400">Training</span>
+      <div className="min-h-screen bg-bg text-ink">
+        <header className="sticky top-0 z-30 border-b border-border/70 bg-surface/80 backdrop-blur-lg">
+          <div className="mx-auto flex max-w-5xl items-center justify-between px-6 py-3.5">
+            <div className="flex items-center gap-2.5">
+              <span className="grid h-8 w-8 place-items-center rounded-lg bg-grad-brand text-sm font-black text-white shadow-glow">
+                B
+              </span>
+              <h1 className="bg-grad-brand bg-clip-text text-lg font-extrabold tracking-tight text-transparent">
+                Bagheera
+              </h1>
+            </div>
+            <nav className="flex items-center gap-1 rounded-full border border-border bg-surface/70 p-1 text-sm shadow-sm">
               <TopLink to="/training/trident" label="TRIDENT" />
               <TopLink to="/training/panther" label="PANTHER" />
-              <span className="mx-2 text-slate-300">|</span>
+              <span className="mx-1 h-4 w-px bg-border-strong" aria-hidden />
               <TopLink to="/models" label="Models" />
               <TopLink to="/queue" label="Queue" />
             </nav>
@@ -46,10 +52,10 @@ function TopLink({ to, label }: { to: string; label: string }) {
     <NavLink
       to={to}
       className={({ isActive }) =>
-        `rounded-md px-3 py-1.5 text-sm font-medium ${
+        `rounded-full px-3.5 py-1.5 text-sm font-semibold transition-all duration-150 ${
           isActive
-            ? 'bg-slate-900 text-white'
-            : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+            ? 'bg-grad-accent text-white shadow-glow'
+            : 'text-ink-muted hover:bg-surface-subtle hover:text-ink'
         }`
       }
     >

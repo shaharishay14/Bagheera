@@ -170,8 +170,6 @@ export default function DirectoryBrowser(props: Props) {
     }
     if (e.key === 'Enter') {
       e.preventDefault();
-      // In multi mode, Enter on a directory navigates into it; on a file, toggle selection.
-      // In single mode (existing behavior), Enter on a file confirms.
       if (mode === 'file' && highlightedEntry?.is_dir) {
         void navigate(highlightedEntry.path);
       } else if (multi && highlightedEntry && !highlightedEntry.is_dir) {
@@ -227,7 +225,7 @@ export default function DirectoryBrowser(props: Props) {
 
   return createPortal(
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/50 backdrop-blur-sm"
       role="presentation"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onCancel();
@@ -240,10 +238,11 @@ export default function DirectoryBrowser(props: Props) {
         aria-label={title}
         tabIndex={-1}
         onKeyDown={onKeyDown}
-        className="flex h-[600px] w-[720px] max-w-[95vw] flex-col overflow-hidden rounded-lg bg-white shadow-xl outline-none"
+        className="flex h-[600px] w-[720px] max-w-[95vw] flex-col overflow-hidden rounded-2xl bg-surface shadow-modal outline-none"
       >
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-          <h2 className="text-sm font-semibold text-slate-700">{title}</h2>
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-border px-5 py-3">
+          <h2 className="text-sm font-semibold text-ink">{title}</h2>
           {roots.length > 1 ? (
             <select
               value={currentRoot ?? ''}
@@ -251,7 +250,7 @@ export default function DirectoryBrowser(props: Props) {
                 setCurrentRoot(e.target.value);
                 void navigate(e.target.value);
               }}
-              className="rounded border border-slate-300 px-2 py-1 text-xs"
+              className="rounded border border-border bg-surface px-2 py-1 text-xs text-ink focus:outline-none focus:ring-1 focus:ring-accent"
             >
               {roots.map((r) => (
                 <option key={r} value={r}>
@@ -262,40 +261,44 @@ export default function DirectoryBrowser(props: Props) {
           ) : null}
         </div>
 
-        <div className="flex items-center gap-2 border-b border-slate-200 bg-slate-50 px-5 py-2">
+        {/* Breadcrumb toolbar */}
+        <div className="flex items-center gap-2 border-b border-border bg-surface-subtle px-5 py-2">
           <button
             type="button"
             onClick={() => parent && void navigate(parent)}
             disabled={isRoot || !parent}
-            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            className="rounded border border-border bg-surface px-2 py-1 text-xs text-ink hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-40 transition-colors"
             aria-label="Go to parent directory"
             title="Parent directory"
           >
             ↑
           </button>
-          <nav className="flex flex-wrap items-center gap-1 text-xs text-slate-600">
+          <nav className="flex flex-wrap items-center gap-1 text-xs text-ink-muted">
             {breadcrumbs.map((crumb, i) => (
               <span key={crumb.path} className="flex items-center gap-1">
                 <button
                   type="button"
                   onClick={() => void navigate(crumb.path)}
-                  className="rounded px-1 hover:bg-slate-200 hover:text-slate-900"
+                  className="rounded px-1 hover:bg-surface hover:text-ink transition-colors"
                 >
                   {crumb.label}
                 </button>
-                {i < breadcrumbs.length - 1 ? <span className="text-slate-400">›</span> : null}
+                {i < breadcrumbs.length - 1 ? (
+                  <span className="text-ink-faint">›</span>
+                ) : null}
               </span>
             ))}
           </nav>
         </div>
 
+        {/* Entries list */}
         <div className="flex-1 overflow-y-auto px-2 py-2">
           {loading ? (
-            <p className="px-4 py-6 text-sm text-slate-500">Loading…</p>
+            <p className="px-4 py-6 text-sm text-ink-muted">Loading…</p>
           ) : error ? (
-            <p className="px-4 py-6 text-sm text-rose-600">{error}</p>
+            <p className="px-4 py-6 text-sm text-[var(--s-failed-text)]">{error}</p>
           ) : entries.length === 0 ? (
-            <p className="px-4 py-6 text-sm text-slate-500">
+            <p className="px-4 py-6 text-sm text-ink-muted">
               {mode === 'file'
                 ? allowedExts.length
                   ? `No matching ${allowedExts.join('/')} files here.`
@@ -321,8 +324,10 @@ export default function DirectoryBrowser(props: Props) {
                         props.onSelect(entry.path);
                       }
                     }}
-                    className={`flex cursor-pointer items-center gap-2 rounded px-3 py-2 text-sm ${
-                      i === highlight ? 'bg-slate-200 text-slate-900' : 'text-slate-700 hover:bg-slate-100'
+                    className={`flex cursor-pointer items-center gap-2 rounded px-3 py-2 text-sm transition-colors ${
+                      i === highlight
+                        ? 'bg-accent-muted text-ink'
+                        : 'text-ink-muted hover:bg-surface-subtle hover:text-ink'
                     }`}
                   >
                     {multi && !entry.is_dir ? (
@@ -331,7 +336,7 @@ export default function DirectoryBrowser(props: Props) {
                         checked={isChecked}
                         onChange={() => toggleSelected(entry.path)}
                         onClick={(e) => e.stopPropagation()}
-                        className="h-4 w-4 rounded border-slate-300"
+                        className="h-4 w-4 rounded border-border accent-accent"
                       />
                     ) : null}
                     {entry.is_dir ? <FolderIcon /> : <FileIcon />}
@@ -343,11 +348,12 @@ export default function DirectoryBrowser(props: Props) {
           )}
         </div>
 
-        <div className="border-t border-slate-200 bg-slate-50 px-5 py-3">
-          <div className="text-xs text-slate-500">
+        {/* Footer with confirm */}
+        <div className="border-t border-border bg-surface-subtle px-5 py-3">
+          <div className="text-[11px] font-semibold uppercase tracking-widest text-ink-faint">
             {multi ? 'Selected files' : 'Selected'}
           </div>
-          <div className="truncate font-mono text-sm text-slate-800">
+          <div className="mt-0.5 truncate font-mono text-sm text-ink">
             {multi
               ? selected.size === 0
                 ? '—'
@@ -358,7 +364,7 @@ export default function DirectoryBrowser(props: Props) {
             <button
               type="button"
               onClick={onCancel}
-              className="rounded border border-slate-300 bg-white px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-100"
+              className="rounded border border-border bg-surface px-3 py-1.5 text-sm text-ink hover:bg-surface-subtle transition-colors"
             >
               Cancel
             </button>
@@ -366,7 +372,7 @@ export default function DirectoryBrowser(props: Props) {
               type="button"
               onClick={confirm}
               disabled={confirmDisabled}
-              className="rounded bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-50"
+              className="rounded-full bg-grad-accent px-4 py-1.5 text-sm font-semibold text-white shadow-glow hover:shadow-glow-lg hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none transition-all duration-150"
             >
               {buttonLabel}
             </button>
@@ -389,7 +395,7 @@ function FolderIcon() {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="text-amber-600"
+      className="shrink-0 text-amber-600"
       aria-hidden="true"
     >
       <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
@@ -408,7 +414,7 @@ function FileIcon() {
       strokeWidth="2"
       strokeLinecap="round"
       strokeLinejoin="round"
-      className="text-slate-500"
+      className="shrink-0 text-ink-faint"
       aria-hidden="true"
     >
       <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />

@@ -1,4 +1,5 @@
 import type { PatchEncoder } from '../lib/api';
+import { inputCls } from './ui';
 
 const OPTIONS: { value: PatchEncoder; label: string }[] = [
   { value: 'uni_v1', label: 'uni_v1' },
@@ -19,7 +20,7 @@ export default function EncoderSelect({ value, onChange, id }: Props) {
       id={id}
       value={value}
       onChange={(e) => onChange(e.target.value as PatchEncoder)}
-      className="block w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+      className={inputCls() + ' font-mono'}
     >
       {OPTIONS.map((opt) => (
         <option key={opt.value} value={opt.value}>

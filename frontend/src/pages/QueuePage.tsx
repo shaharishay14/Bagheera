@@ -9,6 +9,7 @@ import {
   type JobView,
   type QueueResponse,
 } from '../lib/api';
+import { Card, SectionHeader, StatusPill } from '../components/ui';
 
 const POLL_MS = 2000;
 
@@ -19,9 +20,6 @@ export default function QueuePage() {
   const [recentOpen, setRecentOpen] = useState(false);
   const [viewingLogFor, setViewingLogFor] = useState<string | null>(null);
 
-  // Drag state. `order` is non-null only while a drag is in progress and holds
-  // the optimistic ordering; the poll is frozen during that window so the row
-  // under the cursor never jumps.
   const [dragId, setDragId] = useState<string | null>(null);
   const [order, setOrder] = useState<JobView[] | null>(null);
   const draggingRef = useRef(false);
@@ -53,14 +51,8 @@ export default function QueuePage() {
   }, []);
 
   const refresh = async () => {
-    try {
-      setQueue(await getQueue());
-    } catch {
-      /* next poll reconciles */
-    }
+    try { setQueue(await getQueue()); } catch { /* next poll reconciles */ }
   };
-
-  // --- Drag-and-drop (native HTML5) ---------------------------------------
 
   const waiting = order ?? queue?.waiting ?? [];
 
@@ -86,11 +78,7 @@ export default function QueuePage() {
     draggingRef.current = false;
     if (!wasDragging || !current) return;
     const ids = current.map((j) => j.id);
-    if (sameOrder(ids, originalIdsRef.current)) {
-      void refresh();
-      return;
-    }
-    // Optimistically show the new order, then persist + reconcile.
+    if (sameOrder(ids, originalIdsRef.current)) { void refresh(); return; }
     setQueue((q) => (q ? { ...q, waiting: current } : q));
     try {
       setQueue(await reorderQueue(ids));
@@ -99,8 +87,6 @@ export default function QueuePage() {
       void refresh();
     }
   };
-
-  // --- Actions ------------------------------------------------------------
 
   const onCancel = async (id: string) => {
     setNotice(null);
@@ -127,61 +113,60 @@ export default function QueuePage() {
     }
   };
 
-  // --- Render -------------------------------------------------------------
-
   const running = queue?.running ?? null;
   const recent = queue?.recent ?? [];
+
+  const actionBtn =
+    'shrink-0 rounded border border-border-strong bg-surface px-2 py-1 text-xs text-ink hover:bg-surface-subtle transition-colors';
+  const dangerBtn =
+    'shrink-0 rounded border border-[var(--s-failed-border)] bg-surface px-2 py-1 text-xs text-[var(--s-failed-text)] hover:bg-[var(--s-failed-bg)] transition-colors';
 
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-xl font-semibold text-slate-900">Queue</h2>
-        <p className="text-sm text-slate-500">
-          Jobs run one at a time on the GPU. Drag waiting jobs to reorder, or cancel them
-          before they start. Shared across everyone using Bagheera.
+        <h2 className="text-xl font-bold text-ink">Queue</h2>
+        <p className="text-sm text-ink-muted">
+          Jobs run one at a time on the GPU. Drag waiting jobs to reorder, or cancel
+          them before they start. Shared across everyone using Bagheera.
         </p>
       </div>
 
       {error ? (
-        <Banner tone="error" onDismiss={() => setError(null)}>
-          {error}
-        </Banner>
+        <Banner tone="error" onDismiss={() => setError(null)}>{error}</Banner>
       ) : null}
       {notice ? (
-        <Banner tone="warn" onDismiss={() => setNotice(null)}>
-          {notice}
-        </Banner>
+        <Banner tone="warn" onDismiss={() => setNotice(null)}>{notice}</Banner>
       ) : null}
 
       {/* Now running */}
       <section>
         <SectionHeader title="Now running" />
         {running ? (
-          <div className="mt-2 flex items-start justify-between gap-3 rounded-lg border border-blue-200 bg-blue-50 p-4">
+          <div className="mt-2 flex items-start justify-between gap-3 rounded-lg border border-[var(--s-running-border)] bg-[var(--s-running-bg)] p-4">
             <div className="min-w-0">
               <div className="flex items-center gap-2">
-                <StatusBadge status={running.status} />
-                <span className="truncate text-sm font-semibold text-slate-900">
+                <StatusPill status={running.status} />
+                <span className="truncate text-sm font-semibold text-ink">
                   {running.title}
                 </span>
               </div>
               {running.subtitle ? (
-                <p className="mt-0.5 text-xs text-slate-600">{running.subtitle}</p>
+                <p className="mt-0.5 text-xs text-ink-muted">{running.subtitle}</p>
               ) : null}
-              <p className="mt-1 text-[11px] text-slate-500">
+              <p className="mt-1 text-[11px] text-ink-faint">
                 Started {fmtTime(running.started_at)} · running for {since(running.started_at)}
               </p>
             </div>
             <button
               type="button"
               onClick={() => setViewingLogFor(running.id)}
-              className="shrink-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
+              className={actionBtn}
             >
               log
             </button>
           </div>
         ) : (
-          <p className="mt-2 rounded-lg border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-500">
+          <p className="mt-2 rounded-lg border border-dashed border-border-strong bg-surface px-4 py-3 text-sm text-ink-muted">
             Idle — nothing is running.
           </p>
         )}
@@ -191,7 +176,7 @@ export default function QueuePage() {
       <section>
         <SectionHeader title={`Waiting (${waiting.length})`} />
         {waiting.length === 0 ? (
-          <p className="mt-2 rounded-lg border border-dashed border-slate-300 bg-white px-4 py-3 text-sm text-slate-500">
+          <p className="mt-2 rounded-lg border border-dashed border-border-strong bg-surface px-4 py-3 text-sm text-ink-muted">
             The queue is empty.
           </p>
         ) : (
@@ -204,45 +189,37 @@ export default function QueuePage() {
                 onDragOver={(e) => onDragOverRow(e, job)}
                 onDrop={(e) => e.preventDefault()}
                 onDragEnd={finishDrag}
-                className={`flex items-center gap-3 rounded-lg border bg-white p-3 shadow-sm ${
+                className={`flex items-center gap-3 rounded-lg border bg-surface p-3 shadow-card transition-all ${
                   dragId === job.id
-                    ? 'border-slate-400 opacity-60'
-                    : 'border-slate-200 hover:border-slate-300'
+                    ? 'border-accent opacity-60'
+                    : 'border-border hover:border-border-strong'
                 }`}
               >
                 <span
-                  className="cursor-grab select-none text-slate-400 active:cursor-grabbing"
+                  className="cursor-grab select-none text-ink-faint active:cursor-grabbing"
                   title="Drag to reorder"
                   aria-hidden="true"
                 >
                   ⠿
                 </span>
-                <span className="w-6 shrink-0 text-center font-mono text-xs text-slate-400">
+                <span className="w-6 shrink-0 text-center font-mono text-xs text-ink-faint">
                   {i + 1}
                 </span>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2">
-                    <StatusBadge status={job.status} />
-                    <span className="truncate text-sm font-medium text-slate-900">
+                    <StatusPill status={job.status} />
+                    <span className="truncate text-sm font-medium text-ink">
                       {job.title}
                     </span>
                   </div>
                   {job.subtitle ? (
-                    <p className="mt-0.5 text-xs text-slate-500">{job.subtitle}</p>
+                    <p className="mt-0.5 text-xs text-ink-muted">{job.subtitle}</p>
                   ) : null}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setViewingLogFor(job.id)}
-                  className="shrink-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
-                >
+                <button type="button" onClick={() => setViewingLogFor(job.id)} className={actionBtn}>
                   log
                 </button>
-                <button
-                  type="button"
-                  onClick={() => onCancel(job.id)}
-                  className="shrink-0 rounded border border-rose-200 bg-white px-2 py-1 text-xs text-rose-700 hover:bg-rose-50"
-                >
+                <button type="button" onClick={() => onCancel(job.id)} className={dangerBtn}>
                   Cancel
                 </button>
               </li>
@@ -259,41 +236,33 @@ export default function QueuePage() {
           className="flex w-full items-center justify-between text-left"
         >
           <SectionHeader title={`Recent (${recent.length})`} />
-          <span className="text-xs text-slate-500">{recentOpen ? 'Hide' : 'Show'}</span>
+          <span className="text-xs text-ink-faint">{recentOpen ? 'Hide' : 'Show'}</span>
         </button>
         {recentOpen ? (
           recent.length === 0 ? (
-            <p className="mt-2 text-sm text-slate-500">No finished jobs yet.</p>
+            <p className="mt-2 text-sm text-ink-muted">No finished jobs yet.</p>
           ) : (
-            <ul className="mt-2 divide-y divide-slate-200 rounded-lg border border-slate-200 bg-white">
+            <Card className="mt-2 divide-y divide-border">
               {recent.map((job) => (
-                <li key={job.id} className="flex items-center gap-3 px-3 py-2">
-                  <StatusBadge status={job.status} />
+                <div key={job.id} className="flex items-center gap-3 px-3 py-2">
+                  <StatusPill status={job.status} />
                   <div className="min-w-0 flex-1">
-                    <p className="truncate text-sm text-slate-800">{job.title}</p>
-                    <p className="text-[11px] text-slate-500">
+                    <p className="truncate text-sm text-ink">{job.title}</p>
+                    <p className="text-[11px] text-ink-faint">
                       {job.finished_at ? `finished ${fmtTime(job.finished_at)}` : ''}
                     </p>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => setViewingLogFor(job.id)}
-                    className="shrink-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
-                  >
+                  <button type="button" onClick={() => setViewingLogFor(job.id)} className={actionBtn}>
                     log
                   </button>
                   {job.status === 'failed' || job.status === 'canceled' || job.status === 'succeeded' ? (
-                    <button
-                      type="button"
-                      onClick={() => onRerun(job.id)}
-                      className="shrink-0 rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
-                    >
+                    <button type="button" onClick={() => onRerun(job.id)} className={actionBtn}>
                       Re-run
                     </button>
                   ) : null}
-                </li>
+                </div>
               ))}
-            </ul>
+            </Card>
           )
         ) : null}
       </section>
@@ -305,11 +274,6 @@ export default function QueuePage() {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-/** Move `id` so it sits at `target`'s current index. */
 function moveBefore(list: JobView[], id: string, targetId: string): JobView[] {
   if (id === targetId) return list;
   const from = list.findIndex((j) => j.id === id);
@@ -341,29 +305,6 @@ function since(iso: string | null): string {
   return `${hrs}h ${mins % 60}m`;
 }
 
-function SectionHeader({ title }: { title: string }) {
-  return (
-    <h3 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{title}</h3>
-  );
-}
-
-function StatusBadge({ status }: { status: JobView['status'] }) {
-  const tones: Record<JobView['status'], string> = {
-    queued: 'bg-slate-100 text-slate-700 border-slate-200',
-    running: 'bg-blue-50 text-blue-800 border-blue-200 animate-pulse',
-    succeeded: 'bg-emerald-50 text-emerald-800 border-emerald-200',
-    failed: 'bg-rose-50 text-rose-800 border-rose-200',
-    canceled: 'bg-amber-50 text-amber-800 border-amber-200',
-  };
-  return (
-    <span
-      className={`inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tones[status]}`}
-    >
-      {status}
-    </span>
-  );
-}
-
 function Banner({
   tone,
   onDismiss,
@@ -375,8 +316,8 @@ function Banner({
 }) {
   const cls =
     tone === 'error'
-      ? 'border-rose-200 bg-rose-50 text-rose-800'
-      : 'border-amber-200 bg-amber-50 text-amber-900';
+      ? 'border-[var(--s-failed-border)] bg-[var(--s-failed-bg)] text-[var(--s-failed-text)]'
+      : 'border-[var(--s-warn-border)] bg-[var(--s-warn-bg)] text-[var(--s-warn-text)]';
   return (
     <div className={`flex items-start justify-between gap-3 rounded-md border px-4 py-3 text-sm ${cls}`}>
       <span>{children}</span>

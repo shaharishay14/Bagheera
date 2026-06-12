@@ -16,6 +16,7 @@ import {
   type ModelGroupDetail,
   type ModelInfo,
 } from '../lib/api';
+import { Card, Chip, SectionHeader, StatusPill } from '../components/ui';
 
 type DrawerTab = null | 'analysis' | 'parameters' | 'notes';
 
@@ -56,9 +57,7 @@ export default function GroupDetailPage() {
         if (!cancelled) setLoading(false);
       }
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => { cancelled = true; };
   }, [groupId]);
 
   const onSaveName = async () => {
@@ -105,14 +104,14 @@ export default function GroupDetailPage() {
   }, [data]);
 
   if (loading) {
-    return <p className="text-sm text-slate-500">Loading…</p>;
+    return <p className="text-sm text-ink-muted">Loading…</p>;
   }
   if (error || !data) {
     return (
-      <div className="rounded-md border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-800">
+      <div className="rounded-md border border-[var(--s-failed-border)] bg-[var(--s-failed-bg)] px-4 py-3 text-sm text-[var(--s-failed-text)]">
         {error ?? 'Group not found.'}
         <div className="mt-2">
-          <Link to="/models" className="text-rose-900 underline">
+          <Link to="/models" className="underline hover:opacity-80">
             ← Back to models
           </Link>
         </div>
@@ -125,7 +124,7 @@ export default function GroupDetailPage() {
   return (
     <div className="space-y-6">
       <div>
-        <Link to="/models" className="text-xs text-slate-500 hover:text-slate-900">
+        <Link to="/models" className="text-xs text-ink-faint hover:text-ink transition-colors">
           ← Models
         </Link>
         <div className="mt-1 flex items-start justify-between gap-3">
@@ -140,7 +139,7 @@ export default function GroupDetailPage() {
                   if (e.key === 'Enter') onSaveName();
                   if (e.key === 'Escape') setEditingName(false);
                 }}
-                className="rounded-md border border-slate-300 bg-white px-2 py-1 text-xl font-semibold shadow-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+                className="rounded-md border border-border-strong bg-surface px-2 py-1 text-xl font-bold shadow-card focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent"
               />
             </div>
           ) : (
@@ -150,17 +149,15 @@ export default function GroupDetailPage() {
                 setDraftName(group.display_name);
                 setEditingName(true);
               }}
-              className="text-left text-xl font-semibold text-slate-900 hover:text-slate-700"
+              className="text-left text-xl font-bold text-ink hover:text-accent transition-colors"
               title="Click to rename"
             >
               {group.display_name}
             </button>
           )}
         </div>
-        <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
-          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-0.5 font-mono text-slate-700">
-            {group.dataset_name}
-          </span>
+        <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-ink-muted">
+          <Chip mono>{group.dataset_name}</Chip>
           <span>K={group.k}</span>
           <span>·</span>
           <span>n_proto={group.n_proto}</span>
@@ -171,20 +168,21 @@ export default function GroupDetailPage() {
           {group.trident_run_id ? (
             <>
               <span>·</span>
-              <Link to={`/training/trident`} className="underline hover:text-slate-900">
+              <Link to="/training/trident" className="underline hover:text-ink">
                 training run
               </Link>
             </>
           ) : null}
         </div>
-        <p className="mt-2 text-xs text-slate-500">
-          Split: <span className="font-mono">{split.split_name}</span> ({split.total_rows} rows)
+        <p className="mt-1.5 text-xs text-ink-faint">
+          Split: <span className="font-mono text-ink-muted">{split.split_name}</span>{' '}
+          ({split.total_rows} rows)
         </p>
       </div>
 
       {trainingActive ? (
-        <div className="rounded-lg border border-blue-200 bg-blue-50 p-3">
-          <div className="mb-2 flex items-center justify-between text-xs font-medium text-blue-900">
+        <div className="rounded-lg border border-[var(--s-running-border)] bg-[var(--s-running-bg)] p-3">
+          <div className="mb-2 flex items-center justify-between text-xs font-semibold text-[var(--s-running-text)]">
             <span>Active jobs for this group</span>
           </div>
           <JobStatusPoller refId={group.id} refTable="model_groups" onJobFinished={reload} />
@@ -229,24 +227,30 @@ function FoldRow({
   const previews = (previewIds.length > 0 ? previewIds : ['fold preview 1', 'fold preview 2', 'fold preview 3']).slice(0, 3);
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white shadow-sm">
+    <Card>
       <div className="flex items-start gap-3 p-3">
         <button
           type="button"
           onClick={onToggleFavorite}
           aria-label={model.is_favorite ? 'Unfavorite' : 'Favorite'}
-          className={`mt-1 ${model.is_favorite ? 'text-amber-500' : 'text-slate-300 hover:text-slate-500'}`}
+          className={`mt-1 transition-colors ${
+            model.is_favorite
+              ? 'text-[var(--s-warn-text)]'
+              : 'text-ink-faint hover:text-ink-muted'
+          }`}
         >
           <StarIcon filled={model.is_favorite} />
         </button>
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2">
-            <h3 className="text-sm font-semibold text-slate-900">
+            <h3 className="text-sm font-semibold text-ink">
               Fold {model.fold_index + 1} of {model.fold_k}
             </h3>
-            <ModelStatusPill status={model.status} />
-            <VizStatusPill status={model.viz_status} />
-            <span className="font-mono text-[11px] text-slate-500">{model.model_name}</span>
+            <StatusPill status={model.status} />
+            {model.viz_status !== 'ready' && (
+              <StatusPill status={model.viz_status} label={`viz: ${model.viz_status}`} />
+            )}
+            <span className="font-mono text-[11px] text-ink-faint">{model.model_name}</span>
           </div>
           <div className="mt-2 flex gap-2">
             {previews.map((_label, i) => (
@@ -254,15 +258,10 @@ function FoldRow({
                 key={i}
                 src={resolveVizUrl(
                   model.preview_heatmap_paths?.[i],
-                  () =>
-                    vizPlaceholderUrl('heatmap', {
-                      label: `Slide ${i + 1}`,
-                      width: 200,
-                      height: 140,
-                    })
+                  () => vizPlaceholderUrl('heatmap', { label: `Slide ${i + 1}`, width: 200, height: 140 })
                 )}
                 alt={`Preview ${i + 1}`}
-                className="h-20 w-32 rounded border border-slate-200 bg-slate-50 object-cover"
+                className="h-20 w-32 rounded border border-border bg-surface-subtle object-cover"
               />
             ))}
             {model.status === 'failed' || model.viz_status === 'failed' ? (
@@ -271,7 +270,7 @@ function FoldRow({
             <button
               type="button"
               onClick={onShuffle}
-              className="rounded border border-slate-300 bg-white px-2 text-xs text-slate-700 hover:bg-slate-100"
+              className="rounded border border-border-strong bg-surface px-2 text-xs text-ink-muted hover:bg-surface-subtle transition-colors"
               title="Pick new preview slides"
             >
               ↻ Shuffle
@@ -291,13 +290,12 @@ function FoldRow({
             </ActionButton>
             <Link
               to={`/models/${encodeURIComponent(model.id)}/inference`}
-              className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
-              title="Run inference with this fold model (PR 5)"
+              className="rounded border border-border-strong bg-surface px-2 py-1 text-xs text-ink hover:bg-surface-subtle transition-colors"
             >
               Inference →
             </Link>
           </div>
-          <span className="text-[11px] text-slate-500">
+          <span className="text-[11px] text-ink-faint">
             {new Date(model.created_at).toLocaleString()}
           </span>
         </div>
@@ -308,11 +306,11 @@ function FoldRow({
       ) : null}
       {drawer === 'parameters' ? <ParametersPanel model={model} /> : null}
       {drawer === 'notes' ? (
-        <div className="border-t border-slate-200 bg-slate-50 p-4">
+        <div className="border-t border-border bg-surface-subtle p-4">
           <NotesThread modelId={model.id} />
         </div>
       ) : null}
-    </div>
+    </Card>
   );
 }
 
@@ -320,7 +318,7 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
   const previewIds = model.preview_slide_ids ?? [];
   const previews = previewIds.length > 0 ? previewIds : ['Slide 1', 'Slide 2', 'Slide 3'];
   return (
-    <div className="space-y-5 border-t border-slate-200 bg-slate-50 p-4">
+    <div className="space-y-5 border-t border-border bg-surface-subtle p-4">
       <section>
         <SectionHeader title="On 3 example slides" />
         <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -329,20 +327,15 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
               key={i}
               src={resolveVizUrl(
                 model.preview_heatmap_paths?.[i],
-                () =>
-                  vizPlaceholderUrl('heatmap', {
-                    label: `Heatmap ${i + 1}`,
-                    width: 360,
-                    height: 240,
-                  })
+                () => vizPlaceholderUrl('heatmap', { label: `Heatmap ${i + 1}`, width: 360, height: 240 })
               )}
               alt={`Heatmap ${i + 1}`}
-              className="w-full rounded border border-slate-200 bg-white"
+              className="w-full rounded border border-border bg-surface"
             />
           ))}
         </div>
         {model.viz_status !== 'ready' ? (
-          <p className="mt-1 text-[11px] text-slate-500">
+          <p className="mt-1 text-[11px] text-ink-faint">
             Placeholders — viz hasn't finished rendering yet.
           </p>
         ) : null}
@@ -353,15 +346,14 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
         <img
           src={resolveVizUrl(
             model.topk_grid_path,
-            () =>
-              vizPlaceholderUrl('topk', {
-                label: `${model.n_proto}×${model.topk_per_proto} grid`,
-                width: 720,
-                height: 320,
-              })
+            () => vizPlaceholderUrl('topk', {
+              label: `${model.n_proto}×${model.topk_per_proto} grid`,
+              width: 720,
+              height: 320,
+            })
           )}
           alt="Top-K grid"
-          className="mt-2 w-full rounded border border-slate-200 bg-white"
+          className="mt-2 w-full rounded border border-border bg-surface"
         />
       </section>
 
@@ -373,7 +365,7 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
             () => vizPlaceholderUrl('umap', { label: 'UMAP', width: 720, height: 320 })
           )}
           alt="UMAP"
-          className="mt-2 w-full rounded border border-slate-200 bg-white"
+          className="mt-2 w-full rounded border border-border bg-surface"
         />
       </section>
 
@@ -395,8 +387,6 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
 }
 
 function FailureLogLink({ model }: { model: ModelInfo }) {
-  // Pick the right ref: training failures live under the group's panther_train
-  // job; viz failures live under the model's post_train_viz job.
   const [openJobId, setOpenJobId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -407,25 +397,10 @@ function FailureLogLink({ model }: { model: ModelInfo }) {
     try {
       const refTable = model.status === 'failed' ? 'model_groups' : 'models';
       const refId = model.status === 'failed' ? model.group_id : model.id;
-      // Look up the most recent failed job for this ref.
-      const failedJobs = await listJobs({
-        refTable,
-        refId,
-        status: 'failed',
-        limit: 1,
-      });
-      if (failedJobs.length > 0) {
-        setOpenJobId(failedJobs[0].id);
-        return;
-      }
-      // Fall back to most recent job of any status — the failure might be in
-      // a job that's still 'running' (unlikely if the model is already marked
-      // failed) or we missed it.
+      const failedJobs = await listJobs({ refTable, refId, status: 'failed', limit: 1 });
+      if (failedJobs.length > 0) { setOpenJobId(failedJobs[0].id); return; }
       const anyJobs = await listJobs({ refTable, refId, limit: 1 });
-      if (anyJobs.length > 0) {
-        setOpenJobId(anyJobs[0].id);
-        return;
-      }
+      if (anyJobs.length > 0) { setOpenJobId(anyJobs[0].id); return; }
       setError('No job found for this model.');
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to find job.');
@@ -440,12 +415,12 @@ function FailureLogLink({ model }: { model: ModelInfo }) {
         type="button"
         onClick={onOpen}
         disabled={loading}
-        className="inline-flex h-20 w-32 flex-col items-center justify-center rounded border border-rose-200 bg-rose-50 px-2 text-[11px] text-rose-700 hover:border-rose-400 hover:bg-rose-100 disabled:opacity-50"
+        className="inline-flex h-20 w-32 flex-col items-center justify-center rounded border border-[var(--s-failed-border)] bg-[var(--s-failed-bg)] px-2 text-[11px] text-[var(--s-failed-text)] hover:opacity-80 disabled:opacity-50 transition-opacity"
         title="View the error log for this fold"
       >
         <span className="text-lg">⚠</span>
         <span>{loading ? 'Loading…' : 'View error log'}</span>
-        {error ? <span className="text-rose-500">{error}</span> : null}
+        {error ? <span className="text-[10px]">{error}</span> : null}
       </button>
       {openJobId ? (
         <JobLogViewer jobId={openJobId} onClose={() => setOpenJobId(null)} />
@@ -456,7 +431,7 @@ function FailureLogLink({ model }: { model: ModelInfo }) {
 
 function ParametersPanel({ model }: { model: ModelInfo }) {
   return (
-    <div className="border-t border-slate-200 bg-slate-50 p-4">
+    <div className="border-t border-border bg-surface-subtle p-4">
       <div className="grid grid-cols-2 gap-x-6 gap-y-2 font-mono text-xs">
         <Param k="mode" v={model.mode} />
         <Param k="in_dim" v={String(model.in_dim)} />
@@ -478,15 +453,9 @@ function ParametersPanel({ model }: { model: ModelInfo }) {
 function Param({ k, v }: { k: string; v: string }) {
   return (
     <div className="flex gap-2">
-      <dt className="w-32 shrink-0 text-slate-500">{k}</dt>
-      <dd className="flex-1 break-all text-slate-800">{v}</dd>
+      <dt className="w-32 shrink-0 text-ink-faint">{k}</dt>
+      <dd className="flex-1 break-all text-ink">{v}</dd>
     </div>
-  );
-}
-
-function SectionHeader({ title }: { title: string }) {
-  return (
-    <h4 className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">{title}</h4>
   );
 }
 
@@ -503,48 +472,14 @@ function ActionButton({
     <button
       type="button"
       onClick={onClick}
-      className={`rounded border px-2 py-1 text-xs ${
+      className={`rounded border px-2 py-1 text-xs font-medium transition-colors ${
         active
-          ? 'border-slate-900 bg-slate-900 text-white'
-          : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-100'
+          ? 'border-accent bg-accent text-white'
+          : 'border-border-strong bg-surface text-ink hover:bg-surface-subtle'
       }`}
     >
       {children}
     </button>
-  );
-}
-
-function ModelStatusPill({ status }: { status: ModelInfo['status'] }) {
-  const tones: Record<ModelInfo['status'], string> = {
-    pending: 'bg-slate-100 text-slate-700 border-slate-200',
-    running: 'bg-blue-50 text-blue-800 border-blue-200 animate-pulse',
-    ready: 'bg-emerald-50 text-emerald-800 border-emerald-200',
-    failed: 'bg-rose-50 text-rose-800 border-rose-200',
-  };
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tones[status]}`}
-    >
-      {status}
-    </span>
-  );
-}
-
-function VizStatusPill({ status }: { status: ModelInfo['viz_status'] }) {
-  if (status === 'ready') return null;
-  const tones: Record<ModelInfo['viz_status'], string> = {
-    pending: 'bg-slate-100 text-slate-600 border-slate-200',
-    rendering: 'bg-amber-50 text-amber-800 border-amber-200 animate-pulse',
-    ready: 'bg-emerald-50 text-emerald-800 border-emerald-200',
-    failed: 'bg-rose-50 text-rose-800 border-rose-200',
-  };
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tones[status]}`}
-      title={`Visualization status: ${status}`}
-    >
-      viz: {status}
-    </span>
   );
 }
 

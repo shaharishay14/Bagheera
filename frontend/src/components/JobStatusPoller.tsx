@@ -1,16 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { ApiError, listJobs, type JobInfo } from '../lib/api';
+import { StatusPill } from './ui';
 import JobLogViewer from './JobLogViewer';
 
 interface Props {
-  /** Polls /api/jobs?ref_id=… for this group's training + viz jobs. */
   refId: string;
   refTable?: string;
-  /** Stop polling once all jobs are in a terminal state (default: true). */
   stopWhenIdle?: boolean;
-  /** Notification when a job moves to succeeded/failed. */
   onJobFinished?: (job: JobInfo) => void;
-  /** Polling cadence in ms (default 2000). */
   intervalMs?: number;
 }
 
@@ -36,7 +33,6 @@ export default function JobStatusPoller({
         if (cancelled) return;
         setJobs(res);
         setError(null);
-        // Fire onJobFinished for jobs whose status changed to a terminal value.
         for (const j of res) {
           const prev = previousStatuses.current.get(j.id);
           if (prev !== j.status && (j.status === 'succeeded' || j.status === 'failed')) {
@@ -44,21 +40,15 @@ export default function JobStatusPoller({
           }
           previousStatuses.current.set(j.id, j.status);
         }
-        const allIdle = res.every(
-          (j) => j.status === 'succeeded' || j.status === 'failed'
-        );
-        if (stopWhenIdle && res.length > 0 && allIdle) {
-          return; // exit loop
-        }
+        const allIdle = res.every((j) => j.status === 'succeeded' || j.status === 'failed');
+        if (stopWhenIdle && res.length > 0 && allIdle) return;
       } catch (err) {
         if (!cancelled) {
           const msg = err instanceof ApiError ? err.message : 'Failed to poll jobs.';
           setError(msg);
         }
       }
-      if (!cancelled) {
-        timer = window.setTimeout(poll, intervalMs);
-      }
+      if (!cancelled) timer = window.setTimeout(poll, intervalMs);
     };
     poll();
     return () => {
@@ -69,57 +59,36 @@ export default function JobStatusPoller({
 
   if (error) {
     return (
-      <p className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+      <p className="rounded-md border border-[var(--s-failed-border)] bg-[var(--s-failed-bg)] px-3 py-2 text-xs text-[var(--s-failed-text)]">
         {error}
       </p>
     );
   }
-  if (jobs.length === 0) {
-    return null;
-  }
+  if (jobs.length === 0) return null;
+
   return (
     <>
       <ul className="space-y-1 text-xs">
         {jobs.map((j) => (
           <li key={j.id} className="flex items-center justify-between gap-2">
-            <span className="font-mono text-slate-700">{j.job_type}</span>
+            <span className="font-mono text-ink-muted">{j.job_type}</span>
             <div className="flex items-center gap-2">
               <button
                 type="button"
                 onClick={() => setViewingLogFor(j.id)}
-                className="text-[11px] text-slate-500 underline hover:text-slate-900"
+                className="text-[11px] text-ink-faint underline hover:text-ink transition-colors"
                 title="View log tail"
               >
                 log
               </button>
-              <StatusBadge status={j.status} />
+              <StatusPill status={j.status} />
             </div>
           </li>
         ))}
       </ul>
       {viewingLogFor ? (
-        <JobLogViewer
-          jobId={viewingLogFor}
-          onClose={() => setViewingLogFor(null)}
-        />
+        <JobLogViewer jobId={viewingLogFor} onClose={() => setViewingLogFor(null)} />
       ) : null}
     </>
-  );
-}
-
-function StatusBadge({ status }: { status: JobInfo['status'] }) {
-  const tones: Record<JobInfo['status'], string> = {
-    queued: 'bg-slate-100 text-slate-700 border-slate-200',
-    running: 'bg-blue-50 text-blue-800 border-blue-200 animate-pulse',
-    succeeded: 'bg-emerald-50 text-emerald-800 border-emerald-200',
-    failed: 'bg-rose-50 text-rose-800 border-rose-200',
-    canceled: 'bg-amber-50 text-amber-800 border-amber-200',
-  };
-  return (
-    <span
-      className={`inline-flex items-center rounded-full border px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${tones[status]}`}
-    >
-      {status}
-    </span>
   );
 }

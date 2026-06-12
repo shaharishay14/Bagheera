@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { ApiError, getJob, type JobDetail } from '../lib/api';
+import { StatusPill } from './ui';
 
 interface Props {
   jobId: string;
@@ -53,45 +54,53 @@ export default function JobLogViewer({ jobId, onClose }: Props) {
     <div
       role="presentation"
       onClick={onClose}
-      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 p-6 backdrop-blur-sm"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/60 p-6 backdrop-blur-sm"
     >
       <div
         role="dialog"
         aria-modal="true"
         aria-label="Job log"
         onClick={(e) => e.stopPropagation()}
-        className="flex h-[80vh] w-[900px] max-w-[95vw] flex-col overflow-hidden rounded-lg bg-white shadow-xl"
+        className="flex h-[80vh] w-[900px] max-w-[95vw] flex-col overflow-hidden rounded-2xl bg-surface shadow-modal"
       >
-        <div className="flex items-center justify-between border-b border-slate-200 px-5 py-3">
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-slate-900">Job log</p>
-            <p className="truncate font-mono text-[11px] text-slate-500">
-              {data
-                ? `${data.job_type} · ${data.status} · ${jobId}`
-                : jobId}
-            </p>
+        {/* Header */}
+        <div className="flex items-center justify-between border-b border-border px-5 py-3">
+          <div className="min-w-0 flex items-center gap-3">
+            {data ? <StatusPill status={data.status} /> : null}
+            <div className="min-w-0">
+              <p className="text-sm font-semibold text-ink">Job log</p>
+              <p className="truncate font-mono text-[11px] text-ink-faint">
+                {data
+                  ? `${data.job_type} · ${jobId}`
+                  : jobId}
+              </p>
+            </div>
           </div>
           <button
             type="button"
             onClick={onClose}
-            className="rounded border border-slate-300 bg-white px-2 py-1 text-xs text-slate-700 hover:bg-slate-100"
+            className="rounded border border-border bg-surface px-2 py-1 text-xs text-ink hover:bg-surface-subtle transition-colors"
           >
             Close ✕
           </button>
         </div>
-        <div className="flex-1 overflow-auto bg-slate-950 p-4">
+
+        {/* Log body */}
+        <div className="flex-1 overflow-auto bg-ink p-4">
           {error ? (
-            <p className="text-xs text-rose-300">{error}</p>
+            <p className="text-xs text-[var(--s-failed-text)]">{error}</p>
           ) : data ? (
-            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-slate-100">
+            <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-surface/90">
               {data.log_tail || '(no log output yet)'}
             </pre>
           ) : (
-            <p className="text-xs text-slate-400">Loading log…</p>
+            <p className="text-xs text-ink-faint/70">Loading log…</p>
           )}
         </div>
+
+        {/* Error message footer */}
         {data?.error_message ? (
-          <div className="border-t border-rose-200 bg-rose-50 px-5 py-3 text-xs text-rose-800">
+          <div className="border-t border-[var(--s-failed-border)] bg-[var(--s-failed-bg)] px-5 py-3 text-xs text-[var(--s-failed-text)]">
             <span className="font-semibold">error_message:</span>{' '}
             <span className="font-mono">{data.error_message}</span>
           </div>

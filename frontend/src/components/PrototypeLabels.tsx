@@ -4,6 +4,7 @@ import {
   listPrototypeLabels,
   upsertPrototypeLabel,
 } from '../lib/api';
+import { inputCls } from './ui';
 
 interface Props {
   modelId: string;
@@ -75,13 +76,13 @@ export default function PrototypeLabels({ modelId, nProto }: Props) {
 
   if (loadError) {
     return (
-      <p className="rounded-md border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-800">
+      <p className="rounded-md border border-[var(--s-failed-border)] bg-[var(--s-failed-bg)] px-3 py-2 text-xs text-[var(--s-failed-text)]">
         {loadError}
       </p>
     );
   }
   if (loading) {
-    return <p className="text-xs text-slate-500">Loading labels…</p>;
+    return <p className="text-xs text-ink-muted">Loading labels…</p>;
   }
   return (
     <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
@@ -90,14 +91,14 @@ export default function PrototypeLabels({ modelId, nProto }: Props) {
         const err = errors[i];
         return (
           <label key={i} className="block">
-            <div className="mb-1 flex items-center justify-between text-[11px] font-medium uppercase tracking-wide text-slate-500">
+            <div className="mb-1 flex items-center justify-between text-[11px] font-semibold uppercase tracking-widest text-ink-faint">
               <span>Prototype {i}</span>
               {state === 'saving' ? (
-                <span className="text-slate-400">saving…</span>
+                <span className="text-ink-faint normal-case tracking-normal">saving…</span>
               ) : state === 'saved' ? (
-                <span className="text-emerald-600">saved</span>
+                <span className="text-[var(--s-success-text)] normal-case tracking-normal">saved ✓</span>
               ) : state === 'error' ? (
-                <span className="text-rose-600">error</span>
+                <span className="text-[var(--s-failed-text)] normal-case tracking-normal">error</span>
               ) : null}
             </div>
             <input
@@ -106,9 +107,9 @@ export default function PrototypeLabels({ modelId, nProto }: Props) {
               onChange={(e) => setValues((prev) => withReplaced(prev, i, e.target.value))}
               onBlur={() => onBlur(i)}
               placeholder="e.g., fat, necrosis"
-              className="block w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5 font-mono text-xs shadow-sm focus:border-slate-500 focus:outline-none focus:ring-1 focus:ring-slate-500"
+              className={inputCls(state === 'error') + ' font-mono text-xs'}
             />
-            {err ? <p className="mt-1 text-[11px] text-rose-600">{err}</p> : null}
+            {err ? <p className="mt-1 text-[11px] text-[var(--s-failed-text)]">{err}</p> : null}
           </label>
         );
       })}

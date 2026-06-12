@@ -2,8 +2,85 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ─── Design tokens ──────────────────────────────────────────────── */
+:root {
+  /* Core palette — stored as "R G B" channels so Tailwind's `/opacity`
+     modifier works (e.g. bg-surface/80, bg-ink/60). */
+
+  /* Backgrounds — clean near-white canvas with a faint cool tint */
+  --bg:             247 248 252;
+  --surface:        255 255 255;
+  --surface-subtle: 241 242 250;
+
+  /* Borders */
+  --border:         231 232 243;
+  --border-strong:  205 207 230;
+
+  /* Text */
+  --ink:            21 23 43;
+  --ink-muted:      90 94 122;
+  --ink-faint:      146 150 181;
+
+  /* Accent — vibrant violet-indigo */
+  --accent:         91 80 240;
+  --accent-dark:    74 62 224;
+  --accent-muted:   235 233 255;
+  --accent-text:    75 63 214;
+
+  /* Gradient + glow — the SaaS signature */
+  --grad-accent:    linear-gradient(135deg, #6d5cf7 0%, #8b5cf6 50%, #a855f7 100%);
+  --grad-brand:     linear-gradient(120deg, #5b50f0 0%, #8b5cf6 45%, #d946ef 100%);
+  --glow-accent:    0 8px 24px -8px rgba(99, 80, 240, 0.55);
+  --glow-accent-lg: 0 14px 40px -10px rgba(124, 80, 240, 0.5);
+
+  /* Status — saturated semantic colors */
+  --s-queued-bg:      #eef1fa;
+  --s-queued-text:    #4b5172;
+  --s-queued-border:  #cfd5ea;
+
+  --s-running-bg:     #e4ecff;
+  --s-running-text:   #1d4ed8;
+  --s-running-border: #9cbcff;
+
+  --s-success-bg:     #dcfce7;
+  --s-success-text:   #047857;
+  --s-success-border: #6ee7b7;
+
+  --s-failed-bg:      #ffe4e9;
+  --s-failed-text:    #e11d48;
+  --s-failed-border:  #fb9fb4;
+
+  --s-warn-bg:        #fff2d4;
+  --s-warn-text:      #d97706;
+  --s-warn-border:    #fbcf6b;
+
+  --s-rendering-bg:     #f3e8ff;
+  --s-rendering-text:   #9333ea;
+  --s-rendering-border: #d2a8ff;
+}
+
 html,
 body,
 #root {
   height: 100%;
+}
+
+/* ─── Base typography ─────────────────────────────────────────────── */
+body {
+  font-family: 'Figtree', system-ui, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  color: rgb(var(--ink));
+  background-color: rgb(var(--bg));
+  background-image:
+    radial-gradient(60rem 40rem at 110% -10%, rgba(139, 92, 246, 0.10), transparent 60%),
+    radial-gradient(50rem 36rem at -10% 0%, rgba(91, 80, 240, 0.08), transparent 55%);
+  background-attachment: fixed;
+}
+
+/* ─── Focus ring ──────────────────────────────────────────────────── */
+:focus-visible {
+  outline: 2px solid rgb(var(--accent));
+  outline-offset: 2px;
+  border-radius: 3px;
 }
