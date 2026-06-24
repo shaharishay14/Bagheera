@@ -7,6 +7,7 @@ FastAPI + SQLite backend, Vite + React + Tailwind frontend, async SQLite job que
 Full context: [`docs/structure.md`](docs/structure.md) → [`docs/backend.md`](docs/backend.md)
 → [`docs/frontend.md`](docs/frontend.md) → [`docs/database.md`](docs/database.md)
 → [`docs/queue-design.md`](docs/queue-design.md) → [`docs/tests.md`](docs/tests.md)
+→ [`docs/docker.md`](docs/docker.md)
 
 ---
 
@@ -49,6 +50,10 @@ cd frontend && npm run test
 
 # Wipe + recreate DB
 rm backend/bagheera.db && uvicorn app.main:app --reload
+
+# Docker (GPU machine) — see docs/docker.md
+cp .env.example .env                 # fill in WSI_DATA_DIR, STATE_DIR, CUDA tag
+docker compose build && docker compose up -d   # UI at http://localhost:8080
 ```
 
 ---

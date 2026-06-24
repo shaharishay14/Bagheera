@@ -1,0 +1,21 @@
+# Backend build context is the repo root — keep the image lean and reproducible.
+.git
+.gitignore
+.claude
+.env
+**/.env
+**/.env.*
+!**/.env.example
+.venv
+**/.venv
+**/__pycache__
+**/*.pyc
+**/*.db
+**/*.db-wal
+**/*.db-shm
+backend/viz_cache
+backend/inference_outputs
+backend/trident_processed
+backend/datasets_splits
+frontend/node_modules
+frontend/dist

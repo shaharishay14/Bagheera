@@ -1,0 +1,53 @@
+# Bagheera — single-machine GPU deployment.
+#
+#   cp .env.example .env   # then fill in WSI_DATA_DIR, STATE_DIR, CUDA tag, HF_TOKEN
+#   docker compose build
+#   docker compose up -d
+#   open http://localhost:8080
+#
+# Requires the NVIDIA Container Toolkit on the host (see docs/docker.md).
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        CUDA_IMAGE: ${CUDA_IMAGE:-nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04}
+        TORCH_INDEX: ${TORCH_INDEX:-https://download.pytorch.org/whl/cu121}
+        TRIDENT_REF: ${TRIDENT_REF:-main}
+        PANTHER_REF: ${PANTHER_REF:-main}
+    env_file: .env
+    environment:
+      # Make all host GPUs visible; the app pins CUDA_VISIBLE_DEVICES from .env.
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility
+    volumes:
+      # WSI slides — read-only; must be listed in TRIDENT_ALLOWED_ROOTS as /data.
+      - ${WSI_DATA_DIR}:/data:ro
+      # Persistent writable state (survives rebuilds). Paths match .env's *_ROOT vars.
+      - ${STATE_DIR}/db:/state/db
+      - ${STATE_DIR}/viz_cache:/state/viz_cache
+      - ${STATE_DIR}/inference_outputs:/state/inference_outputs
+      - ${STATE_DIR}/datasets_splits:/state/datasets_splits
+      - ${STATE_DIR}/hf_cache:/state/hf_cache
+      # TRIDENT initial-dataset outputs (hardcoded to ./trident_processed, cwd=/app/backend).
+      - ${STATE_DIR}/trident_processed:/app/backend/trident_processed
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    restart: unless-stopped

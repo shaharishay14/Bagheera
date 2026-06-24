@@ -369,6 +369,9 @@ deps missing from the venv; wrong `PANTHER_REPO_PATH`; TRIDENT writing the h5 to
 different path than `locate_features_file` expects; or `VIZ_CACHE_ROOT`/`INFERENCE_ROOT`
 mismatching where renderers wrote. See `backend/README.md` for the symptom→fix table.
 
+For containerized GPU deployment (one shared venv with TRIDENT/PANTHER baked in, all
+paths as in-container volume mounts), see [`docs/docker.md`](docker.md).
+
 ---
 
 ## 10. Seeding demo data (`scripts/seed_demo.py`)
