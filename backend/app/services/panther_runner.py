@@ -19,7 +19,13 @@ _DATASET_NAME_RE = re.compile(DATASET_NAME_PATTERN)
 SPLIT_NAMES = "train"
 CUDA_VISIBLE_DEVICES = "0"
 
-# All splits live under ${PANTHER_REPO_PATH}/src/datasets_splits/{dataset_name}/{split_name}/k={i}/
+# PANTHER's main_prototype does `args.split_dir = os.path.join('splits', args.split_dir)`,
+# so every split physically lives under
+#   ${PANTHER_REPO_PATH}/src/splits/datasets_splits/{dataset}/{split}/k={i}/
+# and PANTHER reads the train/val/test CSVs AND writes the prototype .pkl there.
+# fold_dir_rel (the --split_dir arg) deliberately OMITS the 'splits/' prefix because
+# PANTHER prepends it; the on-disk paths below MUST include it so we write where it reads.
+SPLITS_DIR = "splits"
 DATASETS_SPLITS_DIR = "datasets_splits"
 
 
@@ -28,7 +34,7 @@ def panther_src_dir(panther_repo_path: str) -> Path:
 
 
 def datasets_splits_root_abs(panther_repo_path: str) -> Path:
-    return panther_src_dir(panther_repo_path) / DATASETS_SPLITS_DIR
+    return panther_src_dir(panther_repo_path) / SPLITS_DIR / DATASETS_SPLITS_DIR
 
 
 def dataset_splits_root_abs(panther_repo_path: str, dataset_name: str) -> Path:
