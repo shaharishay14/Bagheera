@@ -100,6 +100,9 @@ export interface RunResolveResponse {
   patch_encoder: PatchEncoder;
   mag: number;
   patch_size: number;
+  /** Feature dimension derived from the encoder (uni_v2→1536, uni_v1→1024,
+   *  phikon/phikon_v2→768), or null when the encoder is unknown. */
+  in_dim?: number | null;
 }
 
 export function resolveFeaturesDir(featuresDir: string): Promise<RunResolveResponse> {

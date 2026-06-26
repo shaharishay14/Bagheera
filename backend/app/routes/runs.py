@@ -10,6 +10,7 @@ from app.db.database import get_db
 from app.db.models import TridentRun
 from app.models.schemas import RunResolveResponse
 from app.services.fs import resolve_within_roots
+from app.services.runner import feature_dim_for
 
 router = APIRouter(prefix="/api/runs", tags=["runs"])
 
@@ -60,4 +61,5 @@ def resolve_features_dir(
         patch_encoder=row.patch_encoder,
         mag=row.mag,
         patch_size=row.patch_size,
+        in_dim=feature_dim_for(row.patch_encoder),
     )

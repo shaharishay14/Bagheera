@@ -21,6 +21,20 @@ ENCODER_PATCH_SIZE: dict[str, int] = {
     "phikon_v2": 224,
 }
 
+# Output feature width of each patch encoder. This is the PANTHER --in_dim: it is a
+# fixed property of the features (not a tunable hyperparameter), so the UI/server
+# derive it from the encoder rather than asking the user to type it.
+ENCODER_FEATURE_DIM: dict[str, int] = {
+    "uni_v1": 1024,
+    "uni_v2": 1536,
+    "phikon": 768,
+    "phikon_v2": 768,
+}
+
+
+def feature_dim_for(encoder: str) -> int | None:
+    return ENCODER_FEATURE_DIM.get(encoder)
+
 MAGNIFICATION = 20
 TASK = "all"
 JOB_DIR_ROOT = "./trident_processed"

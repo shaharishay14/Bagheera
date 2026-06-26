@@ -66,17 +66,24 @@ def feats_h5_data_source(features_dir: str) -> str:
 
     PANTHER's WSIProtoDataset asserts the data_source dir basename is 'feats_h5'
     or 'feats_pt' (it scans that dir for the .h5/.pt files). TRIDENT names its
-    output 'features_{encoder}', so we expose a sibling 'feats_h5' symlink that
-    points at the TRIDENT features dir and hand PANTHER that path. Idempotent
-    across folds/reruns; falls back to the original dir if the link can't be made.
+    output 'features_{encoder}', so we expose a 'feats_h5' symlink pointing at the
+    TRIDENT features dir and hand PANTHER that path.
+
+    Collision-safe: the symlink lives inside a per-encoder wrapper dir
+    ('features_{encoder}__panther/feats_h5') rather than next to the features dir,
+    so two encoders that share a patch-size folder (e.g. uni_v1 and uni_v2, both
+    256px) don't fight over a single 'feats_h5' slot. PANTHER only checks the
+    basename, not the parent. Idempotent; falls back to the original dir on error.
     """
     feats = Path(features_dir)
     if feats.name in FEATS_DIR_NAMES:
         return str(feats)
-    link = feats.parent / "feats_h5"
+    wrapper = feats.parent / f"{feats.name}__panther"
+    link = wrapper / "feats_h5"
     try:
+        wrapper.mkdir(parents=True, exist_ok=True)
         if not (link.is_symlink() or link.exists()):
-            link.symlink_to(feats.name)  # relative link within the same parent dir
+            link.symlink_to(Path("..") / feats.name)  # wrapper/feats_h5 -> ../features_{encoder}
     except OSError:
         return str(feats)
     return str(link)

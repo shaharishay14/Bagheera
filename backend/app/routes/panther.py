@@ -26,6 +26,7 @@ from app.models.schemas import (
 )
 from app.services import panther_runner
 from app.services.fs import resolve_within_roots
+from app.services.runner import feature_dim_for
 from app.services.worker import enqueue_job
 
 router = APIRouter(prefix="/api/panther", tags=["panther"])
@@ -153,6 +154,18 @@ def start_run(
 
     trident_run_id = _resolve_trident_run_id(db, features_dir)
 
+    # in_dim is a fixed property of the encoder's features, not a tunable knob, so
+    # derive it from the resolved TRIDENT run and override whatever the form sent.
+    # This guarantees correctness even if a stale client submits the wrong value;
+    # fall back to the submitted value only when the encoder is unknown.
+    in_dim = payload.in_dim
+    if trident_run_id is not None:
+        trun = db.get(TridentRun, trident_run_id)
+        if trun is not None:
+            derived = feature_dim_for(trun.patch_encoder)
+            if derived is not None:
+                in_dim = derived
+
     group_id = str(uuid.uuid4())
     db.add(
         ModelGroup(
@@ -192,7 +205,7 @@ def start_run(
                 split_name=split.split_name,
                 split_dir_abs=str(fold_abs),
                 mode=payload.mode,
-                in_dim=payload.in_dim,
+                in_dim=in_dim,
                 n_proto_patches=payload.n_proto_patches,
                 n_proto=payload.n_proto,
                 n_init=payload.n_init,

@@ -114,7 +114,14 @@ export default function PantherForm() {
     (async () => {
       try {
         const r = await resolveFeaturesDir(dir);
-        if (!cancelled) setResolved(r);
+        if (!cancelled) {
+          setResolved(r);
+          // in_dim is a fixed property of the features' encoder, not a tunable
+          // hyperparameter — auto-fill it whenever the encoder is recognized.
+          if (r.in_dim != null) {
+            setState((s) => ({ ...s, inDim: r.in_dim as number }));
+          }
+        }
       } catch (err) {
         if (!cancelled) {
           setResolveError(err instanceof ApiError ? err.message : 'Failed to resolve features directory.');
@@ -185,6 +192,9 @@ export default function PantherForm() {
 
   const commandPreview = useMemo(() => buildCommandPreview(state, splitDirRel), [state, splitDirRel]);
   const effectiveK = selectedSplit?.k ?? state.k;
+
+  // When the resolved encoder fixes in_dim, lock the field so it can't be hand-edited.
+  const inDimLocked = !!resolved && resolved.in_dim != null;
 
   const modelError =
     modelTouched && !state.modelName
@@ -464,7 +474,14 @@ export default function PantherForm() {
               </select>
             </Field>
             <NumberInput label="Input dimension" value={state.inDim}
-              onChange={(v) => update('inDim', Math.max(1, Math.round(v)))} min={1} step={1} />
+              onChange={(v) => update('inDim', Math.max(1, Math.round(v)))} min={1} step={1}
+              disabled={inDimLocked}
+              hint={
+                inDimLocked
+                  ? `Set automatically from the ${resolved!.patch_encoder} encoder (${resolved!.in_dim}).`
+                  : undefined
+              }
+            />
             <NumberInput label="Patches per prototype" value={state.nProtoPatches}
               onChange={(v) => update('nProtoPatches', Math.max(1, Math.round(v)))} min={1} step={1000} />
             <NumberInput label="Number of prototypes" value={state.nProto}
@@ -567,9 +584,10 @@ function ToggleButton({ active, onClick, children }: {
   );
 }
 
-function NumberInput({ label, value, onChange, min, max, step, className }: {
+function NumberInput({ label, value, onChange, min, max, step, className, disabled, hint }: {
   label: string; value: number; onChange: (n: number) => void;
   min?: number; max?: number; step?: number; className?: string;
+  disabled?: boolean; hint?: string;
 }) {
   return (
     <div className={className}>
@@ -580,12 +598,14 @@ function NumberInput({ label, value, onChange, min, max, step, className }: {
         type="number"
         value={Number.isFinite(value) ? value : 0}
         min={min} max={max} step={step}
+        disabled={disabled}
         onChange={(e) => {
           const n = Number(e.target.value);
           onChange(Number.isFinite(n) ? n : 0);
         }}
-        className={inputCls()}
+        className={`${inputCls()} disabled:cursor-not-allowed disabled:bg-surface-subtle disabled:text-ink-muted`}
       />
+      {hint ? <p className="mt-1 text-xs text-ink-faint">{hint}</p> : null}
     </div>
   );
 }

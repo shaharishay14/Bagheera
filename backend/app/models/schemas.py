@@ -355,6 +355,10 @@ class RunResolveResponse(BaseModel):
     patch_encoder: str
     mag: int
     patch_size: int
+    # PANTHER --in_dim derived from the encoder (uni_v2→1536, uni_v1→1024,
+    # phikon*→768). None if the encoder is unknown. The PANTHER form uses this to
+    # auto-fill the input-dimension field so it can't be set wrong.
+    in_dim: Optional[int] = None
 
 
 class PantherKFoldStartResponse(BaseModel):
