@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 import os
 import re
 import shlex
@@ -60,33 +61,45 @@ def fold_dir_rel(dataset_name: str, split_name: str, fold_index: int) -> str:
 
 FEATS_DIR_NAMES = ("feats_h5", "feats_pt")
 
+# The feats_h5 symlink is created HERE, on the container's local filesystem, rather
+# than next to the TRIDENT features dir: data volumes are often CIFS/NFS shares that
+# return EPERM ("Operation not permitted") on symlink(), even when the dir is writable.
+# The link's target is an absolute path, so it points at the features wherever they
+# live; PANTHER reads the .h5 files through it. This dir is ephemeral (recreated per
+# container) — fine, because feats_h5_data_source() runs at train time and is idempotent.
+FEATS_LINKS_ROOT = Path("/tmp/bagheera/feats_links")
+
 
 def feats_h5_data_source(features_dir: str) -> str:
     """Return a --data_source path PANTHER will accept.
 
     PANTHER's WSIProtoDataset asserts the data_source dir basename is 'feats_h5'
     or 'feats_pt' (it scans that dir for the .h5/.pt files). TRIDENT names its
-    output 'features_{encoder}', so we expose a 'feats_h5' symlink pointing at the
-    TRIDENT features dir and hand PANTHER that path.
+    output 'features_{encoder}', so we expose a local 'feats_h5' symlink pointing
+    (absolute) at the TRIDENT features dir and hand PANTHER that path.
 
-    Collision-safe: the symlink lives inside a per-encoder wrapper dir
-    ('features_{encoder}__panther/feats_h5') rather than next to the features dir,
-    so two encoders that share a patch-size folder (e.g. uni_v1 and uni_v2, both
-    256px) don't fight over a single 'feats_h5' slot. PANTHER only checks the
-    basename, not the parent. Idempotent; falls back to the original dir on error.
+    Collision-safe: each distinct features dir gets its own wrapper, keyed by a hash
+    of its absolute path, so different encoders/runs never share one 'feats_h5' slot.
+    Idempotent (re-points a stale link); falls back to the original dir on error.
     """
     feats = Path(features_dir)
     if feats.name in FEATS_DIR_NAMES:
         return str(feats)
-    wrapper = feats.parent / f"{feats.name}__panther"
+    target = str(feats)
+    key = hashlib.sha1(target.encode()).hexdigest()[:16]
+    wrapper = FEATS_LINKS_ROOT / key
     link = wrapper / "feats_h5"
     try:
         wrapper.mkdir(parents=True, exist_ok=True)
-        if not (link.is_symlink() or link.exists()):
-            link.symlink_to(Path("..") / feats.name)  # wrapper/feats_h5 -> ../features_{encoder}
+        if link.is_symlink():
+            if os.readlink(link) != target:
+                link.unlink()
+                link.symlink_to(target)
+        elif not link.exists():
+            link.symlink_to(target)
+        return str(link)
     except OSError:
         return str(feats)
-    return str(link)
 
 
 @dataclass(frozen=True)
