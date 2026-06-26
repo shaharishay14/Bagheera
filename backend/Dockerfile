@@ -59,11 +59,13 @@ COPY backend/requirements.txt /tmp/bagheera-requirements.txt
 RUN pip install -r /tmp/bagheera-requirements.txt
 RUN pip install \
         h5py scikit-learn umap-learn matplotlib \
-        opencv-python-headless seaborn pandas openslide-python \
-        scikit-survival
-# scikit-survival (imports as `sksurv`): PANTHER's mil_models/components.py imports it
-# at module load, and the post-training visualizers import mil_models to build the
-# encoder. Without it, every viz step fails with "No module named 'sksurv'".
+        opencv-python-headless seaborn pandas openslide-python
+# PANTHER's mil_models package (imported by the post-training visualizers to build the
+# encoder) pulls in its whole model zoo at load time, each needing extra deps from
+# PANTHER's env.yaml: scikit-survival (sksurv), pot (optimal transport, imports as `ot`),
+# einops, and the cvxpy solvers (ecos/osqp/qdldl) + numexpr. Without these, every viz
+# step fails with a ModuleNotFoundError. Training itself doesn't import mil_models.
+RUN pip install scikit-survival pot einops numexpr ecos osqp qdldl
 
 # --- FAISS (GPU) for PANTHER's `--mode faiss` ----------------------------------------
 # PANTHER calls faiss.Kmeans(..., gpu=numOfGPUs), so the CPU-only wheel won't do — it
