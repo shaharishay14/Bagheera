@@ -61,6 +61,13 @@ RUN pip install \
         h5py scikit-learn umap-learn matplotlib \
         opencv-python-headless seaborn pandas openslide-python
 
+# --- FAISS (GPU) for PANTHER's `--mode faiss` ----------------------------------------
+# PANTHER calls faiss.Kmeans(..., gpu=numOfGPUs), so the CPU-only wheel won't do — it
+# needs the CUDA build. Match the wheel to CUDA_IMAGE: faiss-gpu-cu12 for CUDA 12.x,
+# faiss-gpu-cu11 for 11.x. (Override FAISS_PACKAGE if you change the CUDA base image.)
+ARG FAISS_PACKAGE=faiss-gpu-cu12
+RUN pip install ${FAISS_PACKAGE}
+
 # --- App code ------------------------------------------------------------------------
 COPY backend/ /app/backend/
 RUN chmod +x /app/backend/scripts/*.sh

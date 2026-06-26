@@ -46,6 +46,12 @@ driver supports. Choose a base image ≤ that:
 
 Set both in `.env`.
 
+**GPU FAISS wheel.** PANTHER's `--mode faiss` calls `faiss.Kmeans(..., gpu=N)`, so the
+image installs the CUDA FAISS build (`FAISS_PACKAGE` build arg, default
+`faiss-gpu-cu12`). On a CUDA 11.8 image, override it to `faiss-gpu-cu11` (add
+`FAISS_PACKAGE: faiss-gpu-cu11` under the backend `build.args` in compose). `--mode
+kmeans` uses scikit-learn and needs no FAISS.
+
 ---
 
 ## 2. Configure
