@@ -39,7 +39,9 @@ def _train_one_fold(
 ) -> str:
     """Run PANTHER for one fold. Returns the Model.status set after the attempt."""
     args = panther_runner.PantherFoldArgs(
-        features_dir=model.features_dir,
+        # PANTHER requires the data_source dir to be named feats_h5/feats_pt; TRIDENT
+        # names it features_{encoder}, so hand it a sibling 'feats_h5' symlink instead.
+        features_dir=panther_runner.feats_h5_data_source(model.features_dir),
         split_dir_rel=panther_runner.fold_dir_rel(
             model.dataset_name, split.split_name, model.fold_index
         ),

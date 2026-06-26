@@ -58,6 +58,30 @@ def fold_dir_rel(dataset_name: str, split_name: str, fold_index: int) -> str:
     return f"{DATASETS_SPLITS_DIR}/{dataset_name}/{split_name}/k={fold_index}"
 
 
+FEATS_DIR_NAMES = ("feats_h5", "feats_pt")
+
+
+def feats_h5_data_source(features_dir: str) -> str:
+    """Return a --data_source path PANTHER will accept.
+
+    PANTHER's WSIProtoDataset asserts the data_source dir basename is 'feats_h5'
+    or 'feats_pt' (it scans that dir for the .h5/.pt files). TRIDENT names its
+    output 'features_{encoder}', so we expose a sibling 'feats_h5' symlink that
+    points at the TRIDENT features dir and hand PANTHER that path. Idempotent
+    across folds/reruns; falls back to the original dir if the link can't be made.
+    """
+    feats = Path(features_dir)
+    if feats.name in FEATS_DIR_NAMES:
+        return str(feats)
+    link = feats.parent / "feats_h5"
+    try:
+        if not (link.is_symlink() or link.exists()):
+            link.symlink_to(feats.name)  # relative link within the same parent dir
+    except OSError:
+        return str(feats)
+    return str(link)
+
+
 @dataclass(frozen=True)
 class PantherFoldArgs:
     features_dir: str
