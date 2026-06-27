@@ -17,6 +17,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+# Reuse the same set the preview/inspection layers use so detection stays in lockstep.
+from app.services.preview import SLIDE_ID_COLUMNS
+
+_TIF_SUFFIXES = (".tif", ".tiff")
+
 
 class SplitterError(ValueError):
     """User-facing splitter problem (translated to HTTP 400)."""
@@ -49,6 +54,15 @@ def _rand_suffix() -> str:
     return secrets.token_hex(4)
 
 
+def _strip_tif_suffix(value: str) -> str:
+    """Strip a trailing .tif/.tiff (case-insensitive) from a slide-id value."""
+    lowered = value.lower()
+    for suffix in _TIF_SUFFIXES:
+        if lowered.endswith(suffix):
+            return value[: -len(suffix)]
+    return value
+
+
 def create_kfold_split(
     dataset_name: str,
     source_csv: Path,
@@ -71,6 +85,33 @@ def create_kfold_split(
             rows = list(reader)
     except OSError as exc:
         raise SplitterError(f"Failed to read source CSV: {exc}")
+
+    # Locate the slide-id column (case-insensitive) so we can normalize its
+    # values. The /data mount is read-only, so we transform the GENERATED split
+    # CSVs only, never the source.
+    slide_id_idx: int | None = None
+    slide_id_column: str | None = None
+    if header is not None:
+        for i, col in enumerate(header):
+            if col.strip().lower() in SLIDE_ID_COLUMNS:
+                slide_id_idx = i
+                slide_id_column = col
+                break
+    if slide_id_idx is None:
+        expected = ", ".join(sorted(SLIDE_ID_COLUMNS))
+        raise SplitterError(
+            f"Source CSV has no slide_id column (expected one of: {expected})"
+        )
+
+    # Strip a trailing .tif/.tiff from each slide-id value before any writes.
+    slide_id_normalized = False
+    for row in rows:
+        if len(row) > slide_id_idx:
+            original = row[slide_id_idx]
+            stripped = _strip_tif_suffix(original)
+            if stripped != original:
+                row[slide_id_idx] = stripped
+                slide_id_normalized = True
 
     total = len(rows)
     if total < k:
@@ -129,6 +170,8 @@ def create_kfold_split(
         "created_at": datetime.utcnow().isoformat() + "Z",
         "per_fold_counts": [f.as_dict() for f in per_fold],
         "total_rows": total,
+        "slide_id_column": slide_id_column,
+        "slide_id_normalized": slide_id_normalized,
     }
     (split_root / "metadata.json").write_text(json.dumps(metadata, indent=2))
 

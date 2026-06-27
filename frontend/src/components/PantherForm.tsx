@@ -5,9 +5,11 @@ import {
   ApiError,
   createSplit,
   getCsvRowCount,
+  inspectCsv,
   listSplits,
   resolveFeaturesDir,
   startPantherKFoldRun,
+  type CsvInspectResult,
   type PantherMode,
   type RunResolveResponse,
   type SplitInfo,
@@ -94,6 +96,8 @@ export default function PantherForm() {
   const [rowsLoading, setRowsLoading] = useState(false);
   const [rowsError, setRowsError] = useState<string | null>(null);
 
+  const [csvInspect, setCsvInspect] = useState<CsvInspectResult | null>(null);
+
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
 
@@ -177,6 +181,24 @@ export default function PantherForm() {
     return () => { cancelled = true; };
   }, [state.sourceCsv, state.splitMode]);
 
+  // Inspect the same CSV for a usable slide_id column and `.tif` extensions.
+  // Failures here are non-fatal: we simply skip the notice rather than block the form.
+  useEffect(() => {
+    setCsvInspect(null);
+    const csv = state.sourceCsv.trim();
+    if (!csv || state.splitMode !== 'create') return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const res = await inspectCsv(csv);
+        if (!cancelled) setCsvInspect(res);
+      } catch {
+        if (!cancelled) setCsvInspect(null);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [state.sourceCsv, state.splitMode]);
+
   const selectedSplit = useMemo(
     () => splits.find((s) => s.id === state.selectedSplitId) ?? null,
     [splits, state.selectedSplitId],
@@ -207,8 +229,14 @@ export default function PantherForm() {
   const splitSeedError = state.splitMode === 'create' && state.splitSeed < 0 ? 'Split seed must be ≥ 0.' : null;
   const csvError = state.splitMode === 'create' && !state.sourceCsv.trim() ? 'Source CSV is required.' : null;
 
-  const canCreateSplit = !!resolved && state.splitMode === 'create' && !kError && !splitSeedError && !csvError;
-  const submitInvalid = !!modelError || !state.modelName || !resolved || !state.selectedSplitId || state.pantherSeed < 0;
+  // Blocking: a create-mode CSV with no usable slide_id column can't be used by PANTHER.
+  const csvNoSlideId =
+    state.splitMode === 'create' && csvInspect != null && !csvInspect.has_slide_id;
+
+  const canCreateSplit =
+    !!resolved && state.splitMode === 'create' && !kError && !splitSeedError && !csvError && !csvNoSlideId;
+  const submitInvalid =
+    !!modelError || !state.modelName || !resolved || !state.selectedSplitId || state.pantherSeed < 0 || csvNoSlideId;
 
   const onCopy = async () => {
     try {
@@ -391,6 +419,22 @@ export default function PantherForm() {
                 ) : sourceRows != null ? (
                   <p className="mt-1 text-xs text-ink-muted">{sourceRows.toLocaleString()} data rows.</p>
                 ) : null}
+                {csvInspect && !csvInspect.has_slide_id ? (
+                  <div className="mt-2 rounded-md border border-[var(--s-failed-border)] bg-[var(--s-failed-bg)] px-3 py-2 text-xs text-[var(--s-failed-text)]">
+                    This CSV has no <span className="font-mono">slide_id</span> column (need a column
+                    named <span className="font-mono">slide_id</span>/<span className="font-mono">case_id</span>/<span className="font-mono">slide</span>/<span className="font-mono">id</span>). PANTHER can't use it.
+                  </div>
+                ) : csvInspect && csvInspect.tif_count > 0 ? (
+                  <div className="mt-2 rounded-md border border-[var(--s-warn-border)] bg-[var(--s-warn-bg)] px-3 py-2 text-xs text-[var(--s-warn-text)]">
+                    {csvInspect.tif_count.toLocaleString()} slide IDs end in{' '}
+                    <span className="font-mono">.tif</span>, these will be auto-corrected (extension
+                    stripped) when the split is created.
+                  </div>
+                ) : csvInspect && csvInspect.slide_id_column ? (
+                  <p className="mt-1 text-xs text-[var(--s-success-text)]">
+                    slide_id column: <span className="font-mono">{csvInspect.slide_id_column}</span> ✓
+                  </p>
+                ) : null}
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <NumberInput
@@ -439,7 +483,7 @@ export default function PantherForm() {
                     onChange={(e) => update('selectedSplitId', e.target.value)}
                     className={selectCls}
                   >
-                    <option value="">— select a split —</option>
+                    <option value="">Select a split</option>
                     {splits.map((s) => {
                       const fold0 = s.per_fold_counts[0];
                       const sizes = fold0
@@ -447,7 +491,7 @@ export default function PantherForm() {
                         : 'sizes unknown';
                       return (
                         <option key={s.id} value={s.id}>
-                          {s.split_name} — K={s.k}, {sizes}
+                          {s.split_name} · K={s.k}, {sizes}
                         </option>
                       );
                     })}
@@ -494,7 +538,7 @@ export default function PantherForm() {
               onChange={(v) => update('pantherSeed', Math.max(0, Math.round(v)))} min={0} step={1} />
           </div>
           <p className="text-[11px] text-ink-faint">
-            in_dim depends on the patch encoder used in TRIDENT — UNI=1024, UNI2-h=1536, Phikon=768.
+            in_dim depends on the patch encoder used in TRIDENT: UNI=1024, UNI2-h=1536, Phikon=768.
           </p>
         </fieldset>
 

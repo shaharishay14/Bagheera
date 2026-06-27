@@ -95,7 +95,7 @@ export default function QueuePage() {
       await refresh();
     } catch (err) {
       if (err instanceof ApiError && err.status === 409) {
-        setNotice('That job already started — it can no longer be canceled.');
+        setNotice('That job already started, so it can no longer be canceled.');
       } else {
         setNotice(err instanceof ApiError ? err.message : 'Failed to cancel the job.');
       }
@@ -167,7 +167,7 @@ export default function QueuePage() {
           </div>
         ) : (
           <p className="mt-2 rounded-lg border border-dashed border-border-strong bg-surface px-4 py-3 text-sm text-ink-muted">
-            Idle — nothing is running.
+            Idle. Nothing is running.
           </p>
         )}
       </section>
@@ -291,12 +291,12 @@ function sameOrder(a: string[], b: string[]): boolean {
 }
 
 function fmtTime(iso: string | null): string {
-  if (!iso) return '—';
+  if (!iso) return '-';
   return new Date(iso).toLocaleTimeString();
 }
 
 function since(iso: string | null): string {
-  if (!iso) return '—';
+  if (!iso) return '-';
   const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
   if (secs < 60) return `${secs}s`;
   const mins = Math.floor(secs / 60);

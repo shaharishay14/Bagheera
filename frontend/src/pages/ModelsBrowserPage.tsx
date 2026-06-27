@@ -1,11 +1,14 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { FiTrash2 } from 'react-icons/fi';
 import {
   ApiError,
+  deleteModelGroup,
   listModelGroups,
   type ModelGroupListItem,
 } from '../lib/api';
 import { Chip, StatusPill } from '../components/ui';
+import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 
 type Sort = 'created_desc' | 'created_asc' | 'name';
 
@@ -22,18 +25,26 @@ export default function ModelsBrowserPage() {
   const [favoritesOnly, setFavoritesOnly] = useState(false);
   const [sort, setSort] = useState<Sort>('created_desc');
 
+  const [deleteTarget, setDeleteTarget] = useState<ModelGroupListItem | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+
+  const fetchGroups = useCallback(async (): Promise<ModelGroupListItem[]> => {
+    return listModelGroups({
+      favoriteOnly: favoritesOnly,
+      datasetName: datasetFilter || undefined,
+      q: q || undefined,
+      sort,
+    });
+  }, [q, datasetFilter, favoritesOnly, sort]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     (async () => {
       try {
-        const res = await listModelGroups({
-          favoriteOnly: favoritesOnly,
-          datasetName: datasetFilter || undefined,
-          q: q || undefined,
-          sort,
-        });
+        const res = await fetchGroups();
         if (!cancelled) setGroups(res);
       } catch (err) {
         if (!cancelled) {
@@ -45,7 +56,31 @@ export default function ModelsBrowserPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [q, datasetFilter, favoritesOnly, sort]);
+  }, [fetchGroups]);
+
+  const onConfirmDelete = async () => {
+    if (!deleteTarget) return;
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteModelGroup(deleteTarget.id);
+      setDeleteTarget(null);
+      try {
+        const res = await fetchGroups();
+        setGroups(res);
+      } catch {
+        // best-effort refresh; deletion already succeeded
+        setGroups((prev) => prev.filter((g) => g.id !== deleteTarget.id));
+      }
+    } catch (err) {
+      // Keep the modal open so the user sees why (e.g. 409: a job is running).
+      setDeleteError(
+        err instanceof ApiError ? err.message : 'Failed to delete this model group.',
+      );
+    } finally {
+      setDeleting(false);
+    }
+  };
 
   const datasets = useMemo(() => {
     const s = new Set<string>();
@@ -139,10 +174,40 @@ export default function ModelsBrowserPage() {
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {groups.map((g) => (
-            <GroupCard key={g.id} group={g} />
+            <GroupCard
+              key={g.id}
+              group={g}
+              onRequestDelete={() => {
+                setDeleteError(null);
+                setDeleteTarget(g);
+              }}
+            />
           ))}
         </div>
       )}
+
+      <ConfirmDeleteModal
+        open={deleteTarget !== null}
+        title="Delete model group"
+        name={deleteTarget?.display_name ?? ''}
+        busy={deleting}
+        error={deleteError}
+        onCancel={() => {
+          if (!deleting) {
+            setDeleteTarget(null);
+            setDeleteError(null);
+          }
+        }}
+        onConfirm={onConfirmDelete}
+      >
+        {deleteTarget ? (
+          <>
+            This permanently deletes all {deleteTarget.k} fold models, their prototypes,
+            visualizations, inference outputs, and database records for this group.{' '}
+            <span className="font-semibold text-ink">This cannot be undone.</span>
+          </>
+        ) : null}
+      </ConfirmDeleteModal>
     </div>
   );
 }
@@ -161,12 +226,18 @@ function EmptyState() {
   );
 }
 
-function GroupCard({ group }: { group: ModelGroupListItem }) {
+function GroupCard({
+  group,
+  onRequestDelete,
+}: {
+  group: ModelGroupListItem;
+  onRequestDelete: () => void;
+}) {
   const s = group.summary;
   return (
     <Link
       to={`/models/${encodeURIComponent(group.id)}`}
-      className="group flex flex-col gap-2 rounded-lg border border-border bg-surface p-4 shadow-card transition-all duration-150 hover:border-border-strong hover:shadow-card-hover"
+      className="group relative flex flex-col gap-2 rounded-lg border border-border bg-surface p-4 shadow-card transition-all duration-150 hover:border-border-strong hover:shadow-card-hover"
     >
       <div className="flex items-start justify-between gap-2">
         <h3 className="line-clamp-2 text-base font-semibold text-ink group-hover:text-accent">
@@ -180,13 +251,28 @@ function GroupCard({ group }: { group: ModelGroupListItem }) {
           K={group.k} · n_proto={group.n_proto} · {group.mode}
         </span>
       </div>
-      <div className="mt-1 flex items-center justify-between text-xs text-ink-faint">
+      <div className="mt-1 flex items-center justify-between gap-2 text-xs text-ink-faint">
         <span>{new Date(group.created_at).toLocaleString()}</span>
-        {s.favorited > 0 ? (
-          <span className="inline-flex items-center gap-1 text-[var(--s-warn-text)]">
-            <StarIcon filled /> {s.favorited}/{s.total} favorited
-          </span>
-        ) : null}
+        <div className="flex items-center gap-3">
+          {s.favorited > 0 ? (
+            <span className="inline-flex items-center gap-1 text-[var(--s-warn-text)]">
+              <StarIcon filled /> {s.favorited}/{s.total} favorited
+            </span>
+          ) : null}
+          <button
+            type="button"
+            aria-label={`Delete ${group.display_name}`}
+            title="Delete model group"
+            onClick={(e) => {
+              e.preventDefault();
+              e.stopPropagation();
+              onRequestDelete();
+            }}
+            className="rounded p-1 text-ink-faint transition-colors hover:bg-[var(--s-failed-bg)] hover:text-[var(--s-failed-text)]"
+          >
+            <FiTrash2 size={14} />
+          </button>
+        </div>
       </div>
     </Link>
   );

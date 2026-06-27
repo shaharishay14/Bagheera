@@ -18,6 +18,12 @@ services:
         TRIDENT_REF: ${TRIDENT_REF:-main}
         PANTHER_REF: ${PANTHER_REF:-main}
     env_file: .env
+    # PyTorch DataLoader workers communicate over /dev/shm. Docker's 64MB default
+    # triggers "Unexpected bus error … insufficient shared memory (shm)" during
+    # TRIDENT segmentation/feature extraction. `ipc: host` shares the host's
+    # shared memory directly (no fixed cap) — the most robust fix. If you prefer
+    # an isolated cap instead, remove `ipc: host` and use `shm_size: "16gb"`.
+    ipc: host
     environment:
       # Make all host GPUs visible; the app pins CUDA_VISIBLE_DEVICES from .env.
       NVIDIA_VISIBLE_DEVICES: all
@@ -29,7 +35,11 @@ services:
       - ${STATE_DIR}/db:/state/db
       - ${STATE_DIR}/viz_cache:/state/viz_cache
       - ${STATE_DIR}/inference_outputs:/state/inference_outputs
-      - ${STATE_DIR}/datasets_splits:/state/datasets_splits
+      # K-fold splits AND trained PANTHER prototypes (.pkl) are written here by the app.
+      # PANTHER prepends 'splits/' to --split_dir, so the real on-disk location is
+      # $PANTHER_REPO_PATH/src/splits/datasets_splits. Mount it onto the host so trained
+      # models survive `docker compose down` / rebuild.
+      - ${STATE_DIR}/datasets_splits:/opt/PANTHER/src/splits/datasets_splits
       - ${STATE_DIR}/hf_cache:/state/hf_cache
       # TRIDENT initial-dataset outputs (hardcoded to ./trident_processed, cwd=/app/backend).
       - ${STATE_DIR}/trident_processed:/app/backend/trident_processed

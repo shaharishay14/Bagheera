@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Link, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams } from 'react-router-dom';
+import { FiTrash2 } from 'react-icons/fi';
 import JobLogViewer from '../components/JobLogViewer';
 import JobStatusPoller from '../components/JobStatusPoller';
 import NotesThread from '../components/NotesThread';
 import PrototypeLabels from '../components/PrototypeLabels';
+import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import {
   ApiError,
+  deleteModelGroup,
   getModelGroup,
   listJobs,
   patchModel,
@@ -22,12 +25,16 @@ type DrawerTab = null | 'analysis' | 'parameters' | 'notes';
 
 export default function GroupDetailPage() {
   const { groupId = '' } = useParams<{ groupId: string }>();
+  const navigate = useNavigate();
   const [data, setData] = useState<ModelGroupDetail | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [editingName, setEditingName] = useState(false);
   const [draftName, setDraftName] = useState('');
   const [openDrawer, setOpenDrawer] = useState<Record<string, DrawerTab>>({});
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const reload = useCallback(async () => {
     if (!groupId) return;
@@ -98,6 +105,21 @@ export default function GroupDetailPage() {
     }
   };
 
+  const onConfirmDelete = async () => {
+    setDeleting(true);
+    setDeleteError(null);
+    try {
+      await deleteModelGroup(groupId);
+      navigate('/models');
+    } catch (err) {
+      // Keep the modal open so the user sees why (e.g. 409: a job is running).
+      setDeleteError(
+        err instanceof ApiError ? err.message : 'Failed to delete this model group.',
+      );
+      setDeleting(false);
+    }
+  };
+
   const trainingActive = useMemo(() => {
     if (!data) return false;
     return data.models.some((m) => m.status === 'running' || m.status === 'pending');
@@ -155,6 +177,17 @@ export default function GroupDetailPage() {
               {group.display_name}
             </button>
           )}
+          <button
+            type="button"
+            onClick={() => {
+              setDeleteError(null);
+              setConfirmingDelete(true);
+            }}
+            className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--s-failed-border)] bg-surface px-3 py-1.5 text-xs font-semibold text-[var(--s-failed-text)] hover:bg-[var(--s-failed-bg)] transition-colors"
+            title="Delete this model group"
+          >
+            <FiTrash2 size={13} /> Delete group
+          </button>
         </div>
         <div className="mt-1.5 flex flex-wrap items-center gap-2 text-xs text-ink-muted">
           <Chip mono>{group.dataset_name}</Chip>
@@ -204,6 +237,25 @@ export default function GroupDetailPage() {
           />
         ))}
       </div>
+
+      <ConfirmDeleteModal
+        open={confirmingDelete}
+        title="Delete model group"
+        name={group.display_name}
+        busy={deleting}
+        error={deleteError}
+        onCancel={() => {
+          if (!deleting) {
+            setConfirmingDelete(false);
+            setDeleteError(null);
+          }
+        }}
+        onConfirm={onConfirmDelete}
+      >
+        This permanently deletes all {group.k} fold models, their prototypes,
+        visualizations, inference outputs, and database records for this group.{' '}
+        <span className="font-semibold text-ink">This cannot be undone.</span>
+      </ConfirmDeleteModal>
     </div>
   );
 }
@@ -336,7 +388,7 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
         </div>
         {model.viz_status !== 'ready' ? (
           <p className="mt-1 text-[11px] text-ink-faint">
-            Placeholders — viz hasn't finished rendering yet.
+            Placeholders shown while viz finishes rendering.
           </p>
         ) : null}
       </section>
@@ -442,7 +494,7 @@ function ParametersPanel({ model }: { model: ModelInfo }) {
         <Param k="num_workers" v={String(model.num_workers)} />
         <Param k="fold_index" v={`${model.fold_index} / ${model.fold_k - 1}`} />
         <Param k="split_name" v={model.split_name} />
-        <Param k="trident_run_id" v={model.trident_run_id ?? '—'} />
+        <Param k="trident_run_id" v={model.trident_run_id ?? '-'} />
         <Param k="features_dir" v={model.features_dir} />
         <Param k="prototypes_dir" v={model.prototypes_dir} />
       </div>

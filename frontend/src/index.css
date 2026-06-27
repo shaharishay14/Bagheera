@@ -7,31 +7,31 @@
   /* Core palette — stored as "R G B" channels so Tailwind's `/opacity`
      modifier works (e.g. bg-surface/80, bg-ink/60). */
 
-  /* Backgrounds — clean near-white canvas with a faint cool tint */
-  --bg:             247 248 252;
+  /* Backgrounds — warm off-white cream canvas (never pure white) */
+  --bg:             250 249 246;
   --surface:        255 255 255;
-  --surface-subtle: 241 242 250;
+  --surface-subtle: 245 241 234;
 
   /* Borders */
-  --border:         231 232 243;
-  --border-strong:  205 207 230;
+  --border:         236 231 223;
+  --border-strong:  221 213 200;
 
-  /* Text */
-  --ink:            21 23 43;
-  --ink-muted:      90 94 122;
-  --ink-faint:      146 150 181;
+  /* Text — warm near-black + warm greys */
+  --ink:            30 27 22;
+  --ink-muted:      107 101 92;
+  --ink-faint:      163 156 144;
 
-  /* Accent — vibrant violet-indigo */
-  --accent:         91 80 240;
-  --accent-dark:    74 62 224;
-  --accent-muted:   235 233 255;
-  --accent-text:    75 63 214;
+  /* Accent — light orange brand (#fab05e) */
+  --accent:         250 176 94;
+  --accent-dark:    232 148 63;
+  --accent-muted:   253 237 219;
+  --accent-text:    185 112 31;
 
-  /* Gradient + glow — the SaaS signature */
-  --grad-accent:    linear-gradient(135deg, #6d5cf7 0%, #8b5cf6 50%, #a855f7 100%);
-  --grad-brand:     linear-gradient(120deg, #5b50f0 0%, #8b5cf6 45%, #d946ef 100%);
-  --glow-accent:    0 8px 24px -8px rgba(99, 80, 240, 0.55);
-  --glow-accent-lg: 0 14px 40px -10px rgba(124, 80, 240, 0.5);
+  /* Gradient + glow — warm orange signature */
+  --grad-accent:    linear-gradient(135deg, #fab05e 0%, #f59e42 50%, #e8843a 100%);
+  --grad-brand:     linear-gradient(120deg, #fcbf7a 0%, #f59e42 45%, #e8843a 100%);
+  --glow-accent:    0 8px 24px -8px rgba(250, 176, 94, 0.55);
+  --glow-accent-lg: 0 14px 40px -10px rgba(245, 158, 66, 0.5);
 
   /* Status — saturated semantic colors */
   --s-queued-bg:      #eef1fa;
@@ -67,14 +67,14 @@ body,
 
 /* ─── Base typography ─────────────────────────────────────────────── */
 body {
-  font-family: 'Figtree', system-ui, sans-serif;
+  font-family: 'Poppins', system-ui, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
   color: rgb(var(--ink));
   background-color: rgb(var(--bg));
   background-image:
-    radial-gradient(60rem 40rem at 110% -10%, rgba(139, 92, 246, 0.10), transparent 60%),
-    radial-gradient(50rem 36rem at -10% 0%, rgba(91, 80, 240, 0.08), transparent 55%);
+    radial-gradient(60rem 40rem at 110% -10%, rgba(250, 176, 94, 0.10), transparent 60%),
+    radial-gradient(50rem 36rem at -10% 0%, rgba(245, 158, 66, 0.07), transparent 55%);
   background-attachment: fixed;
 }
 

@@ -306,6 +306,30 @@ export function patchModelGroup(
   });
 }
 
+export interface ModelGroupDeleteResult {
+  group_id: string;
+  models_deleted: number;
+  inferences_deleted: number;
+  inference_notes_deleted: number;
+  inference_batches_deleted: number;
+  prototype_labels_deleted: number;
+  model_notes_deleted: number;
+  panther_runs_deleted: number;
+  dirs_removed: string[];
+}
+
+/**
+ * Permanently delete a model group and every artifact it owns (fold models,
+ * prototypes, viz, inference outputs, DB records). The backend returns a
+ * summary on success; throws ApiError(404) if missing, or ApiError(409) when
+ * the group has a running fold or an active/queued job (message explains why).
+ */
+export function deleteModelGroup(groupId: string): Promise<ModelGroupDeleteResult> {
+  return request(`/api/model-groups/${encodeURIComponent(groupId)}`, {
+    method: 'DELETE',
+  });
+}
+
 export function getModel(modelId: string): Promise<ModelInfo> {
   return request(`/api/models/${encodeURIComponent(modelId)}`);
 }
@@ -627,6 +651,25 @@ export function resolveVizUrl(
 export function getCsvRowCount(path: string): Promise<{ rows: number }> {
   const params = new URLSearchParams({ path });
   return request(`/api/fs/csv-count?${params.toString()}`);
+}
+
+export interface CsvInspectResult {
+  rows: number;
+  columns: string[];
+  has_slide_id: boolean;
+  slide_id_column: string | null;
+  tif_count: number;
+  sample_ids: string[];
+}
+
+/**
+ * Inspect a CSV's columns for split creation: whether a usable slide_id column
+ * exists, and how many of its values still carry a `.tif` extension (which the
+ * backend strips when the split is built).
+ */
+export function inspectCsv(path: string): Promise<CsvInspectResult> {
+  const params = new URLSearchParams({ path });
+  return request(`/api/fs/csv-inspect?${params.toString()}`);
 }
 
 // --- Jobs -----------------------------------------------------------------

@@ -356,9 +356,9 @@ export default function DirectoryBrowser(props: Props) {
           <div className="mt-0.5 truncate font-mono text-sm text-ink">
             {multi
               ? selected.size === 0
-                ? '—'
+                ? '-'
                 : `${selected.size} file${selected.size === 1 ? '' : 's'}`
-              : (selectablePath ?? '—')}
+              : (selectablePath ?? '-')}
           </div>
           <div className="mt-3 flex justify-end gap-2">
             <button

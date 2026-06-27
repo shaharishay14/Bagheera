@@ -24,7 +24,7 @@ export default {
         },
       },
       fontFamily: {
-        sans: ['Figtree', 'system-ui', 'sans-serif'],
+        sans: ['Poppins', 'system-ui', 'sans-serif'],
         mono: ['JetBrains Mono', 'Menlo', 'Consolas', 'monospace'],
       },
       backgroundImage: {
@@ -32,9 +32,9 @@ export default {
         'grad-brand':  'var(--grad-brand)',
       },
       boxShadow: {
-        card:        '0 1px 2px rgba(21,23,43,0.04), 0 4px 16px -8px rgba(21,23,43,0.10)',
-        'card-hover':'0 2px 6px rgba(21,23,43,0.06), 0 12px 32px -10px rgba(91,80,240,0.22)',
-        modal:       '0 24px 70px -12px rgba(21,23,43,0.28)',
+        card:        '0 1px 2px rgba(30,27,22,0.04), 0 4px 16px -8px rgba(30,27,22,0.10)',
+        'card-hover':'0 2px 6px rgba(30,27,22,0.06), 0 12px 32px -10px rgba(245,158,66,0.22)',
+        modal:       '0 24px 70px -12px rgba(30,27,22,0.28)',
         glow:        'var(--glow-accent)',
         'glow-lg':   'var(--glow-accent-lg)',
       },

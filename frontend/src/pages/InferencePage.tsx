@@ -371,7 +371,7 @@ function ParamsCard({ params }: { params: TridentParamsResponse }) {
         <dt className="text-ink-faint">GPUs</dt>
         <dd>{params.gpus ?? '0'}</dd>
         <dt className="text-ink-faint">Features dir</dt>
-        <dd>{params.expected_features_dir_name ?? '—'}</dd>
+        <dd>{params.expected_features_dir_name ?? '-'}</dd>
       </dl>
       <p className="mt-2 text-xs text-ink-faint">
         New slides will be processed with these settings automatically.
@@ -685,7 +685,7 @@ function ExamplePatchesGrid({ inferenceId, nProto }: { inferenceId: string; nPro
           className="w-full rounded border border-border bg-surface"
         />
         <p className="mt-1 text-[11px] text-ink-faint">
-          No patches on disk yet — showing placeholder.
+          No patches on disk yet, showing placeholder.
         </p>
       </div>
     );

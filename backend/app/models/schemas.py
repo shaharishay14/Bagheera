@@ -184,6 +184,18 @@ class ModelGroupPatch(BaseModel):
     display_name: Optional[str] = None
 
 
+class ModelGroupDeleteResponse(BaseModel):
+    group_id: str
+    models_deleted: int
+    inferences_deleted: int
+    inference_notes_deleted: int
+    inference_batches_deleted: int
+    prototype_labels_deleted: int
+    model_notes_deleted: int
+    panther_runs_deleted: int
+    dirs_removed: list[str]
+
+
 class TridentParamsResponse(BaseModel):
     trident_run_id: Optional[str]
     patch_encoder: Optional[str]
@@ -422,6 +434,15 @@ class FsRootsResponse(BaseModel):
 
 class FsCsvCountResponse(BaseModel):
     rows: int
+
+
+class FsCsvInspectResponse(BaseModel):
+    rows: int
+    columns: list[str]
+    has_slide_id: bool
+    slide_id_column: Optional[str]
+    tif_count: int
+    sample_ids: list[str]
 
 
 # --- Jobs ----------------------------------------------------------------

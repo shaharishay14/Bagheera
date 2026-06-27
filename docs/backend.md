@@ -202,6 +202,12 @@ The three real handlers:
 - `create_kfold_split(...)` — shuffles rows with `Random(seed)`, chunks into K, writes
   `k=i/{train,val,test}.csv` where `test=chunk[i]`, `val=chunk[(i+1)%K]`, `train=rest`.
   Writes a `metadata.json`. Invariant: every row is in `test` exactly once.
+- **slide_id validation + .tif auto-fix:** detects the slide-id column case-insensitively
+  against the shared `SLIDE_ID_COLUMNS` (from `preview.py`). If none is present, raises
+  `SplitterError` → HTTP 400 (PANTHER never gets an unusable CSV). Otherwise strips a
+  trailing `.tif`/`.tiff` from that column's values before writing the generated CSVs
+  (the source CSV on the read-only `/data` mount is never modified). `metadata.json`
+  records `slide_id_column` and `slide_id_normalized`.
 
 ### `panther_runner.py` — PANTHER subprocess + paths
 - Path helpers: `datasets_splits_root_abs`, `fold_dir_abs`, `fold_dir_rel` (relative path
@@ -258,6 +264,7 @@ All under `/api`. Schemas live in `app/models/schemas.py`; the interactive spec 
 | GET | `/api/fs/roots` | Configured allowed roots. |
 | GET | `/api/fs/list?path=&filter=dirs_only&show_hidden=` | Sandboxed directory listing. |
 | GET | `/api/fs/csv-count?path=` | Row count of a CSV (header skipped). |
+| GET | `/api/fs/csv-inspect?path=` | CSV diagnostics: `{rows, columns[], has_slide_id, slide_id_column, tif_count, sample_ids[]}`. Detects the slide-id column case-insensitively (shared `SLIDE_ID_COLUMNS`); `tif_count` = values ending in `.tif`/`.tiff`. Lazy `pandas` import. |
 
 ### TRIDENT — `routes/trident.py` + `routes/runs.py`
 | Method | Path | Purpose |
@@ -287,6 +294,7 @@ All under `/api`. Schemas live in `app/models/schemas.py`; the interactive spec 
 | GET | `/api/model-groups[?favorite_only=&dataset_name=&q=&sort=]` | List groups with aggregated fold summary. |
 | GET | `/api/model-groups/{id}` | Group + its models + the split. |
 | PATCH | `/api/model-groups/{id}` | Rename (cascades `display_name` to fold models). |
+| DELETE | `/api/model-groups/{id}` | Delete the group, all fold models, and dependent rows (`InferenceNote → Inference → InferenceBatch → PrototypeLabel → ModelNote → PantherRun → Model`, then `ModelGroup`) in one transaction, plus on-disk `viz_cache/{model_id}`, `inference_outputs/{model_id}`, and each `prototypes_dir`. Shared `Split`/`TridentRun` untouched. 404 if missing; **409** if a fold is `running` or an active (`queued`/`running`) job references the group/models. Returns a delete summary. Logic in `services/model_delete.py`. |
 | GET | `/api/models/{id}` | One model. |
 | PATCH | `/api/models/{id}` | Set `is_favorite` / `display_name`. |
 | POST | `/api/models/{id}/shuffle-preview` | Re-pick 3 preview slides + enqueue a `post_train_viz` re-render. |

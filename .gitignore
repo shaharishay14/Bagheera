@@ -20,6 +20,8 @@ dist/
 
 # Databases
 *.db
+*.db-wal
+*.db-shm
 *.sqlite
 *.sqlite3
 

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.db.database import get_db
 from app.db.models import Model, ModelGroup, Split, TridentRun
 from app.models.schemas import (
+    ModelGroupDeleteResponse,
     ModelGroupDetail,
     ModelGroupListItem,
     ModelGroupPatch,
@@ -26,6 +27,7 @@ from app.models.schemas import (
 from app.routes.panther import _model_to_info  # reuse the converter
 from app.routes.splits import _to_info as _split_to_info
 from app.services import inference as inference_service
+from app.services.model_delete import delete_model_group
 from app.services.preview import pick_preview_slides
 from app.services.worker import enqueue_job
 
@@ -175,6 +177,28 @@ def patch_group(
     split = db.get(Split, group.split_id)
     models = db.query(Model).filter(Model.group_id == group_id).order_by(Model.fold_index.asc()).all()
     return _group_to_listitem(group, models, split)
+
+
+@router.delete("/model-groups/{group_id}", response_model=ModelGroupDeleteResponse)
+def delete_group(group_id: str, db: Session = Depends(get_db)) -> ModelGroupDeleteResponse:
+    """Delete a group, its fold models, all dependent rows, and on-disk artifacts.
+
+    404 if the group is missing; 409 if a fold model is still running or an
+    active (queued/running) job references the group or its models. Shared
+    Split / TridentRun rows are left intact.
+    """
+    summary = delete_model_group(db, group_id)
+    return ModelGroupDeleteResponse(
+        group_id=summary.group_id,
+        models_deleted=summary.models_deleted,
+        inferences_deleted=summary.inferences_deleted,
+        inference_notes_deleted=summary.inference_notes_deleted,
+        inference_batches_deleted=summary.inference_batches_deleted,
+        prototype_labels_deleted=summary.prototype_labels_deleted,
+        model_notes_deleted=summary.model_notes_deleted,
+        panther_runs_deleted=summary.panther_runs_deleted,
+        dirs_removed=summary.dirs_removed,
+    )
 
 
 # --- Model endpoints ------------------------------------------------------
