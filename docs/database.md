@@ -60,8 +60,14 @@ Central row. `id`, `created_at`; naming (`base_name`, `model_name` (**unique**),
 `n_init`, `seed`, `num_workers`); outcome (`status` `pending|running|ready|failed`,
 `prototypes_dir`, `prototype_files` JSON); `is_favorite`; viz artifacts (`viz_status`
 `pending|rendering|ready|failed`, `preview_slide_ids` JSON, `preview_heatmap_paths` JSON,
-`topk_grid_path`, `topk_per_proto`, `umap_path`).
+`topk_grid_path`, `topk_per_proto`, `umap_path`, `viz_artifacts`).
 **Unique constraint:** `(group_id, fold_index)`.
+
+- `viz_artifacts` (TEXT, **nullable**, default NULL): JSON object of rendered
+  Analysis-page artifacts keyed by section, e.g. `{"section_a": {"slide_id", "thumbnail",
+  "assignment_map", "pi_c", "roi_raw", "roi_colored", "roi_bbox", "roi_index"}}`.
+  Added post-initial-schema via the `_ensure_viz_artifacts_column()` `ALTER TABLE`
+  guard in `init_db()` (backfills existing DBs without a wipe).
 
 ### `PantherRun`
 Per-fold subprocess execution log: `id`, `created_at`, `group_id` (indexed),

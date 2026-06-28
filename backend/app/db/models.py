@@ -131,6 +131,11 @@ class Model(Base):
     topk_grid_path: Mapped[str | None] = mapped_column(String, nullable=True)
     topk_per_proto: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     umap_path: Mapped[str | None] = mapped_column(String, nullable=True)
+    # JSON object of rendered Analysis-page artifacts, keyed by section, e.g.
+    # {"section_a": {"slide_id": ..., "thumbnail": ..., "assignment_map": ...,
+    #  "pi_c": ..., "roi_raw": ..., "roi_colored": ..., "roi_bbox": [...],
+    #  "roi_index": 0}}. Sections B/C/D added later.
+    viz_artifacts: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
 
 class PantherRun(Base):

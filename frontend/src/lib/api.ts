@@ -158,6 +158,35 @@ export type PantherMode = 'faiss' | 'kmeans';
 export type ModelStatus = 'pending' | 'running' | 'ready' | 'failed';
 export type VizStatus = 'pending' | 'rendering' | 'ready' | 'failed';
 
+/**
+ * Section A of the per-fold Analysis view — mirrors the PANTHER paper's
+ * per-slide figure panel for ONE representative slide. Every sub-field is a
+ * viz_cache path (resolve via `resolveVizUrl`) and may be absent if that
+ * individual render failed (partial success) — degrade gracefully.
+ */
+export interface SectionA {
+  /** The slide this panel was rendered for. */
+  slide_id: string;
+  /** Whole-slide H&E thumbnail (with scale bar). */
+  thumbnail?: string;
+  /** Hi-res prototype assignment overlay across the whole slide. */
+  assignment_map?: string;
+  /** GMM π_c bar chart, bars colored per prototype. */
+  pi_c?: string;
+  /** Raw H&E of the auto-picked ROI. */
+  roi_raw?: string;
+  /** Same ROI tiled as prototype-colored 256px patches. */
+  roi_colored?: string;
+  /** [x, y, w, h] of the picked ROI in slide coordinates. */
+  roi_bbox?: [number, number, number, number];
+  /** Monotonic index of the current ROI pick (changes on repick → cache-busts). */
+  roi_index?: number;
+}
+
+export interface VizArtifacts {
+  section_a?: SectionA;
+}
+
 export interface ModelInfo {
   id: string;
   created_at: string;
@@ -190,6 +219,8 @@ export interface ModelInfo {
   topk_grid_path: string | null;
   topk_per_proto: number;
   umap_path: string | null;
+  /** Per-fold paper-style figure artifacts. Null until Section A is rendered. */
+  viz_artifacts?: VizArtifacts | null;
 }
 
 export interface PantherKFoldRunPayload {
@@ -352,6 +383,22 @@ export function shuffleModelPreview(modelId: string): Promise<ShufflePreviewResp
 
 export function getModelTridentParams(modelId: string): Promise<TridentParamsResponse> {
   return request(`/api/models/${encodeURIComponent(modelId)}/trident-params`);
+}
+
+/**
+ * Re-pick the Section A ROI for a model and return the updated ModelInfo. The
+ * new pick lands under `viz_artifacts.section_a` with a fresh `roi_index`, so
+ * the `roi_raw` / `roi_colored` filenames change and the browser cache-busts.
+ *
+ * Throws `ApiError` with:
+ *   - 404 — the model does not exist
+ *   - 409 — Section A has not been rendered yet (render it first)
+ *   - 422 — no valid tissue window to pick an ROI from
+ */
+export function repickRoi(modelId: string): Promise<ModelInfo> {
+  return request(`/api/models/${encodeURIComponent(modelId)}/repick-roi`, {
+    method: 'POST',
+  });
 }
 
 // --- Prototype labels -----------------------------------------------------

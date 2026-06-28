@@ -37,6 +37,7 @@ def init_db() -> None:
 
     Base.metadata.create_all(bind=engine)
     _ensure_queue_position_column()
+    _ensure_viz_artifacts_column()
 
 
 def _ensure_queue_position_column() -> None:
@@ -46,6 +47,16 @@ def _ensure_queue_position_column() -> None:
         names = {row[1] for row in cols}
         if "queue_position" not in names:
             conn.exec_driver_sql("ALTER TABLE jobs ADD COLUMN queue_position INTEGER")
+            conn.commit()
+
+
+def _ensure_viz_artifacts_column() -> None:
+    """No migration framework: add models.viz_artifacts to DBs predating it."""
+    with engine.connect() as conn:
+        cols = conn.exec_driver_sql("PRAGMA table_info(models)").fetchall()
+        names = {row[1] for row in cols}
+        if "viz_artifacts" not in names:
+            conn.exec_driver_sql("ALTER TABLE models ADD COLUMN viz_artifacts TEXT")
             conn.commit()
 
 

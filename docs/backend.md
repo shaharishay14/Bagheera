@@ -177,7 +177,7 @@ The three real handlers:
 | Handler | File | Does |
 | --- | --- | --- |
 | `panther_train` | `panther_train.py` | For a Model Group, runs K PANTHER subprocesses sequentially (one `PantherRun` row each); sets each Model `ready`/`failed`; enqueues a `post_train_viz` per successful fold. |
-| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the top-K grid, the UMAP; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
+| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the top-K grid, the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`); writes `model.viz_artifacts={"section_a":{...}}` + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
 | `inference` | `inference_job.py` | For one Inference: hash slide → run TRIDENT → locate `.h5` → render heatmap/mixture/example-patches/t-SNE → `ready` if ≥1 render succeeded. |
 
 ---
@@ -234,14 +234,15 @@ The three real handlers:
 - `build_trident_command(...)`, `generate_custom_wsi_csv(...)`, `locate_features_file(...)`,
   `inference_output_dir(model_id, inference_id)` — TRIDENT plumbing for one slide.
 
-### `visualization.py` — the six renderers
+### `visualization.py` — the renderers
 Lazy PANTHER bootstrap (`_ensure_panther_on_syspath` prepends `${PANTHER_REPO_PATH}/src`),
 a local `_load_panther_encoder` that works around an upstream `get_panther_encoder`
 hardcoded-`n_proto` bug, and:
 
 | Function | Scope | Output |
 | --- | --- | --- |
-| `render_assignment_heatmap(model, h5, wsi)` | per-slide | `heatmap_{stem}.png` |
+| `render_assignment_heatmap(model, h5, wsi, *, downsample_target=128, out_path=None)` | per-slide | `heatmap_{stem}.png` |
+| `render_assignment_heatmap_from_assignments(model, coords, labels, ps, wsi, *, downsample_target=128, out_path=None)` | per-slide | painted heatmap from precomputed assignments (no encoder run) |
 | `render_mixture_plot(model, h5)` | per-slide | `mixture_{stem}.png` |
 | `render_example_patches(model, h5, wsi, k=4)` | per-slide | dir of `prototype_NN/patch_NN.png` |
 | `render_tsne_per_slide(model, h5, wsi)` | per-slide | `tsne_{stem}.png` |
@@ -250,6 +251,22 @@ hardcoded-`n_proto` bug, and:
 
 Cost caps: UMAP samples ≤500 patches/slide, ≤50 000 total; top-K streams every h5 once
 keeping a per-prototype heap.
+
+**Section A (Analysis page per-slide panel).** Mirrors the PANTHER paper figure; all
+artifacts land under `viz_cache/{model_id}/section_a/`.
+
+| Function | Output | Notes |
+| --- | --- | --- |
+| `render_wsi_thumbnail(model, wsi)` | `section_a/thumbnail_{stem}.png` | Downscaled H&E (longest side ≤ `THUMB_MAX_PX=2048`) with a physical scale bar from openslide `MPP_X`. **If MPP is missing, the thumbnail renders without a scale bar — never fails.** |
+| `render_pi_c_barplot(model, mixture_probs)` | `section_a/pi_c.png` | One bar per prototype, **each bar colored by `get_default_cmap(n_proto)`** (same cmap as the assignment map). X labels `C1..Cn`, y label `Proportion π_c`. Takes the GMM `mixture_probs` directly (the third return of `_compute_assignments`). |
+| `render_assignment_heatmap_from_assignments(..., downsample_target=SECTION_A_DOWNSAMPLE=24, out_path=section_a/assignment_map_{stem}.png)` | `section_a/assignment_map_{stem}.png` | Hi-res (zoomable) reuse of the existing heatmap renderer with a smaller downsample target. |
+| `render_roi_from_assignments(model, coords, labels, ps, wsi, roi_index)` → `(raw, colored, [x,y,w,h], used_idx, n_windows)` | `section_a/roi_raw_{stem}_{idx}.png`, `section_a/roi_colored_{stem}_{idx}.png` | Deterministically picks a `ROI_GRID×ROI_GRID` (7×7) tile of patches by ranking non-overlapping windows (**diversity then density**); `roi_index` selects the i-th (wraps via modulo, so the UI can "repick"). `raw` = openslide `read_region` of the window + scale bar; `colored` = the window tiled as its patches, each blended with its prototype color. |
+| `render_roi(model, h5, wsi, roi_index=0)` → `(raw, colored, [x,y,w,h])` | same as above | Convenience wrapper that runs the encoder, then calls `render_roi_from_assignments`. |
+
+**Repick cache.** `save_section_a_cache(model, slide_id, coords, labels, patch_size)` writes
+`section_a/roi_cache.npz` (coords + cluster_labels) and `section_a/roi_cache.json`
+(slide_id + patch_size); `load_section_a_cache(model)` reads them back. This lets the
+repick-ROI endpoint re-tile **without re-running the encoder**.
 
 ---
 
@@ -295,10 +312,31 @@ All under `/api`. Schemas live in `app/models/schemas.py`; the interactive spec 
 | GET | `/api/model-groups/{id}` | Group + its models + the split. |
 | PATCH | `/api/model-groups/{id}` | Rename (cascades `display_name` to fold models). |
 | DELETE | `/api/model-groups/{id}` | Delete the group, all fold models, and dependent rows (`InferenceNote → Inference → InferenceBatch → PrototypeLabel → ModelNote → PantherRun → Model`, then `ModelGroup`) in one transaction, plus on-disk `viz_cache/{model_id}`, `inference_outputs/{model_id}`, and each `prototypes_dir`. Shared `Split`/`TridentRun` untouched. 404 if missing; **409** if a fold is `running` or an active (`queued`/`running`) job references the group/models. Returns a delete summary. Logic in `services/model_delete.py`. |
-| GET | `/api/models/{id}` | One model. |
+| GET | `/api/models/{id}` | One model. Response includes `viz_artifacts` (parsed from the JSON column; null until rendered). |
 | PATCH | `/api/models/{id}` | Set `is_favorite` / `display_name`. |
 | POST | `/api/models/{id}/shuffle-preview` | Re-pick 3 preview slides + enqueue a `post_train_viz` re-render. |
+| POST | `/api/models/{id}/repick-roi` | Re-render the Section A ROI at the **next** window (wraps around), update `viz_artifacts.section_a.roi_*`/`roi_bbox`/`roi_index`, return the updated `ModelInfo`. **Synchronous** (uses the cached coords/labels — no encoder run). 404 missing model; **409** if Section A isn't rendered yet (no `section_a` / no repick cache / WSI gone); 422 if the slide has no tissue window. |
 | GET | `/api/models/{id}/trident-params` | The encoder/mag/patch_size/gpus a model inherits, + expected features dir name. |
+
+`ModelInfo.viz_artifacts` is the parsed `Model.viz_artifacts` JSON column (null-safe), also
+included in the group-detail response (`/api/model-groups/{id}` reuses `_model_to_info`).
+The Section A shape:
+
+```json
+{ "section_a": {
+    "slide_id": "<deterministic preview slide stem>",
+    "thumbnail": "<abs viz path>",
+    "assignment_map": "<abs viz path>",
+    "pi_c": "<abs viz path>",
+    "roi_raw": "<abs viz path>",
+    "roi_colored": "<abs viz path>",
+    "roi_bbox": [x, y, w, h],
+    "roi_index": 0
+} }
+```
+
+All paths are absolute `viz_cache` paths served by `GET /api/viz/{path}`. Any individual
+render that fails is simply absent from the dict (partial success still publishes).
 
 ### Prototype labels — `routes/labels.py`
 | Method | Path | Purpose |

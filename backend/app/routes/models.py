@@ -27,8 +27,10 @@ from app.models.schemas import (
 from app.routes.panther import _model_to_info  # reuse the converter
 from app.routes.splits import _to_info as _split_to_info
 from app.services import inference as inference_service
+from app.services import visualization
 from app.services.model_delete import delete_model_group
 from app.services.preview import pick_preview_slides
+from app.services.visualization import VisualizationError
 from app.services.worker import enqueue_job
 
 router = APIRouter(prefix="/api", tags=["models"])
@@ -253,6 +255,68 @@ def shuffle_preview(model_id: str, db: Session = Depends(get_db)) -> ShufflePrev
     return ShufflePreviewResponse(
         model_id=model.id, preview_slide_ids=slide_ids, job_id=job_id
     )
+
+
+@router.post("/models/{model_id}/repick-roi", response_model=ModelInfo)
+def repick_roi(model_id: str, db: Session = Depends(get_db)) -> ModelInfo:
+    """Re-render the Section A ROI at the next window and return the model.
+
+    Renders synchronously on the request thread: it uses the cached
+    coords/cluster_labels from the Section A .npz (no encoder run), so only a
+    handful of openslide reads are needed — fast enough to do inline. The new
+    ROI is the `(current roi_index + 1)`-th window, wrapping around the ranked
+    set, so repeated calls cycle through the representative ROIs.
+
+    404 if the model is missing; 409 if Section A hasn't been rendered yet
+    (no `viz_artifacts.section_a` / no repick cache / WSI unavailable); 422 if
+    the slide has no tissue window to pick.
+    """
+    model = db.get(Model, model_id)
+    if model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found.")
+
+    try:
+        artifacts = json.loads(model.viz_artifacts) if model.viz_artifacts else {}
+    except json.JSONDecodeError:
+        artifacts = {}
+    section = artifacts.get("section_a")
+    if not section:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="No Section A render available to repick — render the model's visualizations first.",
+        )
+
+    try:
+        slide_id, coords, cluster_labels, patch_size = visualization.load_section_a_cache(model)
+    except VisualizationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    wsi_dir = visualization.resolve_dataset_wsi_dir(model, db)
+    wsi_path = visualization.resolve_wsi_path(slide_id, wsi_dir) if wsi_dir else None
+    if wsi_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The WSI for the Section A slide is no longer available.",
+        )
+
+    current_idx = int(section.get("roi_index", 0))
+    try:
+        raw, colored, bbox, used_idx, _n = visualization.render_roi_from_assignments(
+            model, coords, cluster_labels, patch_size, wsi_path, roi_index=current_idx + 1
+        )
+    except VisualizationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    section["roi_raw"] = str(raw)
+    section["roi_colored"] = str(colored)
+    section["roi_bbox"] = bbox
+    section["roi_index"] = used_idx
+    artifacts["section_a"] = section
+    model.viz_artifacts = json.dumps(artifacts)
+    db.add(model)
+    db.commit()
+    db.refresh(model)
+    return _model_to_info(model)
 
 
 @router.get("/models/{model_id}/trident-params", response_model=TridentParamsResponse)

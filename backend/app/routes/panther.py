@@ -67,6 +67,7 @@ def _model_to_info(row: Model) -> ModelInfo:
         topk_grid_path=row.topk_grid_path,
         topk_per_proto=row.topk_per_proto,
         umap_path=row.umap_path,
+        viz_artifacts=json.loads(row.viz_artifacts) if row.viz_artifacts else None,
     )
 
 

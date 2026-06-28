@@ -122,10 +122,22 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
         failures.append(f"umap: {exc}")
         log.write(f"  FAILED umap: {exc}\n{traceback.format_exc()}")
 
+    # --- Section A (Analysis page per-slide panel) --------------------------
+    section_a: dict | None = None
+    try:
+        section_a = _render_section_a(model, db, wsi_dir, log)
+        if section_a:
+            successes += 1
+    except Exception as exc:  # noqa: BLE001 — never let Section A abort the rest
+        failures.append(f"section_a: {exc}")
+        log.write(f"  FAILED section_a: {exc}\n{traceback.format_exc()}")
+
     # --- Commit results -----------------------------------------------------
     model.preview_heatmap_paths = json.dumps(heatmap_paths) if heatmap_paths else None
     model.topk_grid_path = topk_grid_path
     model.umap_path = umap_path
+    if section_a:
+        model.viz_artifacts = json.dumps({"section_a": section_a})
     model.viz_status = "ready" if successes > 0 else "failed"
     db.add(model)
     db.commit()
@@ -137,6 +149,98 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
         log.write("Failures detail:")
         for f in failures:
             log.write(f"  - {f}")
+
+
+def _render_section_a(model: Model, db: Session, wsi_dir, log: JobLog) -> dict | None:
+    """Render the Section A per-slide panel for ONE deterministic slide.
+
+    Renders the whole-slide thumbnail, a hi-res (zoomable) assignment map, the
+    π_c bar chart, and the index-0 ROI (raw + prototype-colored). Each render
+    is wrapped in its own try/except so partial success still publishes. The
+    slide's coords/labels are cached to a .npz so the repick-ROI endpoint can
+    re-tile without re-running the encoder.
+
+    Returns the `section_a` dict to store under model.viz_artifacts, or None if
+    no usable slide could be resolved (missing WSI / h5).
+    """
+    from pathlib import Path
+
+    if wsi_dir is None:
+        log.write("  section_a: no WSI dir resolved — skipping.")
+        return None
+
+    ids = pick_preview_slides(model, count=1)
+    if not ids:
+        log.write("  section_a: no slide could be picked (train.csv missing/empty).")
+        return None
+    slide_id = ids[0]
+
+    h5_path = Path(model.features_dir) / f"{slide_id}.h5"
+    wsi_path = visualization.resolve_wsi_path(slide_id, wsi_dir)
+    if not h5_path.is_file():
+        log.write(f"  section_a: h5 not found for {slide_id} at {h5_path} — skipping.")
+        return None
+    if wsi_path is None:
+        log.write(f"  section_a: no WSI file with stem {slide_id} under {wsi_dir} — skipping.")
+        return None
+
+    log.write(f"  section_a: rendering for slide {slide_id}")
+
+    # Run the encoder ONCE; reuse the assignments for every Section A render.
+    encoder = visualization._load_panther_encoder(model)
+    coords, feats, patch_size = visualization._load_h5(h5_path)
+    cluster_labels, _qq, mixture_probs = visualization._compute_assignments(encoder, feats)
+
+    section: dict = {"slide_id": slide_id, "roi_index": 0}
+
+    try:
+        out = visualization.render_wsi_thumbnail(model, wsi_path)
+        section["thumbnail"] = str(out)
+        log.write(f"    thumbnail: {out}")
+    except Exception as exc:  # noqa: BLE001
+        log.write(f"    FAILED thumbnail: {exc}\n{traceback.format_exc()}")
+
+    try:
+        out = visualization.render_assignment_heatmap_from_assignments(
+            model,
+            coords,
+            cluster_labels,
+            patch_size,
+            wsi_path,
+            downsample_target=visualization.SECTION_A_DOWNSAMPLE,
+            out_path=visualization.section_a_dir(model) / f"assignment_map_{slide_id}.png",
+        )
+        section["assignment_map"] = str(out)
+        log.write(f"    assignment_map: {out}")
+    except Exception as exc:  # noqa: BLE001
+        log.write(f"    FAILED assignment_map: {exc}\n{traceback.format_exc()}")
+
+    try:
+        out = visualization.render_pi_c_barplot(model, mixture_probs)
+        section["pi_c"] = str(out)
+        log.write(f"    pi_c: {out}")
+    except Exception as exc:  # noqa: BLE001
+        log.write(f"    FAILED pi_c: {exc}\n{traceback.format_exc()}")
+
+    try:
+        raw, colored, bbox, used_idx, n_windows = visualization.render_roi_from_assignments(
+            model, coords, cluster_labels, patch_size, wsi_path, roi_index=0
+        )
+        section["roi_raw"] = str(raw)
+        section["roi_colored"] = str(colored)
+        section["roi_bbox"] = bbox
+        section["roi_index"] = used_idx
+        log.write(f"    roi: index {used_idx}/{n_windows} bbox={bbox}")
+    except Exception as exc:  # noqa: BLE001
+        log.write(f"    FAILED roi: {exc}\n{traceback.format_exc()}")
+
+    # Cache coords/labels so repick-ROI re-tiles without the encoder.
+    try:
+        visualization.save_section_a_cache(model, slide_id, coords, cluster_labels, patch_size)
+    except Exception as exc:  # noqa: BLE001
+        log.write(f"    WARNING: failed to write Section A repick cache: {exc}")
+
+    return section
 
 
 def _resolve_preview_slide_ids(model: Model) -> list[str]:

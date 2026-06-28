@@ -128,6 +128,14 @@ UMAP_MAX_PATCHES_PER_SLIDE = 500
 UMAP_MAX_TOTAL_PATCHES = 50_000
 TOPK_DEFAULT_THUMB_PX = 96  # side length of each cropped patch in the grid
 
+# Section A (Analysis page) tuning.
+THUMB_MAX_PX = 2048          # longest side of the whole-slide thumbnail
+SECTION_A_DOWNSAMPLE = 24    # hi-res assignment-map downsample target (zoomable)
+ROI_GRID = 7                 # ROI is a ROI_GRID x ROI_GRID tile of patches
+ROI_CELL_PX = 80             # rendered cell side in the colored ROI grid
+ROI_RAW_MAX_PX = 768         # longest side of the raw ROI crop
+ROI_TINT_ALPHA = 0.5         # blend weight of the prototype color over the patch
+
 
 # ---------------------------------------------------------------------------
 # PANTHER bootstrap (lazy — never touches sys.path at module import)
@@ -339,10 +347,54 @@ def _compute_assignments(encoder, feats):
 # ---------------------------------------------------------------------------
 
 
-def render_assignment_heatmap(model: Model, h5_path: Path, wsi_path: Path) -> Path:
+def render_assignment_heatmap(
+    model: Model,
+    h5_path: Path,
+    wsi_path: Path,
+    *,
+    downsample_target: int = 128,
+    out_path: Path | None = None,
+) -> Path:
     """Categorical assignment heatmap painted over the WSI thumbnail.
 
     Per-slide. Output: viz_cache/{model_id}/heatmap_{slide_stem}.png
+
+    `downsample_target` controls resolution: a smaller value renders the slide
+    at a higher (more zoomable) resolution. Section A passes a small value
+    (SECTION_A_DOWNSAMPLE); the per-fold previews keep the default 128.
+    `out_path` lets a caller redirect the file (e.g. into the section_a/ dir).
+    """
+    encoder = _load_panther_encoder(model)
+    coords, feats, patch_size = _load_h5(h5_path)
+    cluster_labels, _qq, _probs = _compute_assignments(encoder, feats)
+    if out_path is None:
+        out_path = _viz_dir(model) / f"heatmap_{Path(h5_path).stem}.png"
+    return render_assignment_heatmap_from_assignments(
+        model,
+        coords,
+        cluster_labels,
+        patch_size,
+        wsi_path,
+        downsample_target=downsample_target,
+        out_path=out_path,
+    )
+
+
+def render_assignment_heatmap_from_assignments(
+    model: Model,
+    coords,
+    cluster_labels,
+    patch_size: int,
+    wsi_path: Path,
+    *,
+    downsample_target: int = 128,
+    out_path: Path | None = None,
+) -> Path:
+    """Paint a categorical assignment heatmap from already-computed assignments.
+
+    Split out of `render_assignment_heatmap` so Section A can reuse the
+    `(coords, cluster_labels)` it already computed for the thumbnail / π_c /
+    ROI renders instead of re-running the encoder.
     """
     _ensure_panther_on_syspath()
     from visualization.prototype_visualization_utils import (  # type: ignore[import-not-found]
@@ -350,16 +402,12 @@ def render_assignment_heatmap(model: Model, h5_path: Path, wsi_path: Path) -> Pa
         visualize_categorical_heatmap,
     )
 
-    encoder = _load_panther_encoder(model)
-    coords, feats, patch_size = _load_h5(h5_path)
-    cluster_labels, _qq, _probs = _compute_assignments(encoder, feats)
-
     wsi = _open_wsi(wsi_path)
     cmap = get_default_cmap(model.n_proto)
-    # Match the notebook's choice: downsample 128× target, fall back to deepest
-    # level if the slide is too small.
+    # Match the notebook's choice; fall back to the deepest level if the slide
+    # is too small to satisfy the requested downsample.
     try:
-        vis_level = wsi.get_best_level_for_downsample(128)
+        vis_level = wsi.get_best_level_for_downsample(downsample_target)
     except Exception:  # noqa: BLE001 — openslide quirks
         vis_level = wsi.level_count - 1
 
@@ -374,7 +422,8 @@ def render_assignment_heatmap(model: Model, h5_path: Path, wsi_path: Path) -> Pa
         verbose=False,
     )
 
-    out_path = _viz_dir(model) / f"heatmap_{Path(h5_path).stem}.png"
+    if out_path is None:
+        out_path = _viz_dir(model) / f"heatmap_{Path(wsi_path).stem}.png"
     img.save(str(out_path), format="PNG", optimize=True)
     return out_path
 
@@ -653,6 +702,275 @@ def render_umap(model: Model, dataset_features_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Section A (per-fold Analysis page) renderers
+# ---------------------------------------------------------------------------
+
+
+def section_a_dir(model: Model) -> Path:
+    """The VIZ_CACHE_ROOT/{model_id}/section_a/ directory (created on demand)."""
+    return _viz_dir(model, subdir="section_a")
+
+
+def render_wsi_thumbnail(model: Model, wsi_path: Path) -> Path:
+    """Downscaled H&E thumbnail of the whole slide, with a physical scale bar.
+
+    Per-slide. Output: viz_cache/{model_id}/section_a/thumbnail_{slide_stem}.png
+
+    Microns-per-pixel is read from openslide's MPP_X property. If it's missing
+    the thumbnail is still rendered, just without the scale bar (we never fail
+    on a missing MPP).
+    """
+    from PIL import Image  # noqa: WPS433,F401 — Resampling enum lives on Image
+
+    wsi = _open_wsi(wsi_path)
+    try:
+        w0, h0 = wsi.dimensions
+        longest = max(w0, h0)
+        if longest > THUMB_MAX_PX:
+            tw = max(1, round(w0 * THUMB_MAX_PX / longest))
+            th = max(1, round(h0 * THUMB_MAX_PX / longest))
+        else:
+            tw, th = w0, h0
+        thumb = wsi.get_thumbnail((tw, th)).convert("RGB")
+        mpp = _wsi_mpp(wsi)
+        if mpp:
+            # Each thumbnail pixel spans this many microns.
+            _draw_scale_bar(thumb, mpp * (w0 / thumb.width))
+    finally:
+        _close_wsi(wsi)
+
+    out_path = section_a_dir(model) / f"thumbnail_{Path(wsi_path).stem}.png"
+    thumb.save(str(out_path), format="PNG", optimize=True)
+    return out_path
+
+
+def render_pi_c_barplot(model: Model, mixture_probs) -> Path:
+    """Bar chart of the GMM mixture proportions π_c for one slide.
+
+    Per-slide. Output: viz_cache/{model_id}/section_a/pi_c.png
+
+    One bar per prototype, each bar colored with that prototype's color from
+    PANTHER's `get_default_cmap(n_proto)` — the same cmap the assignment map
+    uses, so colors line up across the panel. X labels are C1..Cn.
+    """
+    _ensure_panther_on_syspath()
+    import numpy as np  # noqa: WPS433
+    import matplotlib.pyplot as plt  # noqa: WPS433
+
+    from visualization.prototype_visualization_utils import get_default_cmap  # type: ignore[import-not-found]
+
+    n = model.n_proto
+    probs = np.asarray(mixture_probs, dtype=float).ravel()
+    if probs.shape[0] < n:
+        probs = np.concatenate([probs, np.zeros(n - probs.shape[0])])
+    probs = probs[:n]
+
+    cmap = get_default_cmap(n)
+    colors = [tuple(c / 255 for c in cmap[i][:3]) for i in range(n)]
+
+    fig, ax = plt.subplots(figsize=(max(4.0, n * 0.45), 3.2), dpi=150)
+    ax.bar(range(n), probs, color=colors, edgecolor="black", linewidth=0.4)
+    ax.set_xticks(range(n))
+    ax.set_xticklabels([f"C{i + 1}" for i in range(n)], fontsize=8)
+    ax.set_ylabel(r"Proportion $\pi_c$")
+    ax.set_xlabel("Prototype")
+    ax.set_ylim(bottom=0)
+    for spine in ("top", "right"):
+        ax.spines[spine].set_visible(False)
+
+    out_path = section_a_dir(model) / "pi_c.png"
+    fig.savefig(str(out_path), bbox_inches="tight", dpi=150)
+    _close_fig(fig)
+    return out_path
+
+
+def _select_roi_windows(coords, cluster_labels, patch_size: int, grid: int = ROI_GRID):
+    """Deterministically rank non-overlapping grid×grid ROI windows.
+
+    Tiles the level-0 plane into `span = grid * patch_size` squares aligned to
+    the absolute coordinate origin, groups each patch into its tile, and ranks
+    the occupied tiles by (prototype diversity, then patch density). The
+    non-overlapping tiling guarantees that consecutive `roi_index` values pick
+    visibly different ROIs (no near-duplicate windows), and the ranking is
+    fully determined by the cached `(coords, cluster_labels)` — so repick is
+    reproducible.
+
+    Returns a best-first list of `(x0, y0, w, h, member_indices)`.
+    """
+    import numpy as np  # noqa: WPS433
+    from collections import defaultdict  # noqa: WPS433
+
+    coords = np.asarray(coords)
+    labels = np.asarray(cluster_labels)
+    if coords.shape[0] == 0:
+        return []
+
+    cell = int(patch_size)
+    span = grid * cell
+    tx = (coords[:, 0] // span).astype(np.int64)
+    ty = (coords[:, 1] // span).astype(np.int64)
+
+    members: dict[tuple[int, int], list[int]] = defaultdict(list)
+    for i in range(coords.shape[0]):
+        members[(int(tx[i]), int(ty[i]))].append(i)
+
+    ranked = []
+    for (kx, ky), idxs in members.items():
+        distinct = len({int(labels[i]) for i in idxs})
+        ranked.append((distinct, len(idxs), kx * span, ky * span, idxs))
+
+    # Diversity first, then density; deterministic spatial tiebreak.
+    ranked.sort(key=lambda w: (-w[0], -w[1], w[2], w[3]))
+    return [(int(x0), int(y0), span, span, idxs) for (_d, _c, x0, y0, idxs) in ranked]
+
+
+def render_roi_from_assignments(
+    model: Model,
+    coords,
+    cluster_labels,
+    patch_size: int,
+    wsi_path: Path,
+    roi_index: int = 0,
+):
+    """Render the raw + prototype-colored ROI for the `roi_index`-th window.
+
+    Used by both the Section A render (with freshly computed assignments) and
+    the repick endpoint (with assignments loaded from the .npz cache — no
+    encoder run). Deterministic given `(model, slide, roi_index)`.
+
+    Returns `(roi_raw_path, roi_colored_path, [x, y, w, h], used_index, num_windows)`.
+    `used_index` is `roi_index % num_windows`, so the caller can wrap around.
+    """
+    _ensure_panther_on_syspath()
+    import numpy as np  # noqa: WPS433
+    from PIL import Image  # noqa: WPS433
+
+    from visualization.prototype_visualization_utils import get_default_cmap  # type: ignore[import-not-found]
+
+    windows = _select_roi_windows(coords, cluster_labels, patch_size, grid=ROI_GRID)
+    if not windows:
+        raise VisualizationError("No tissue patches available to pick an ROI from.")
+
+    n = len(windows)
+    idx = int(roi_index) % n
+    x0, y0, w, h, member_idxs = windows[idx]
+
+    coords = np.asarray(coords)
+    labels = np.asarray(cluster_labels)
+    cmap = get_default_cmap(model.n_proto)
+    cell = int(patch_size)
+    stem = Path(wsi_path).stem
+    out_dir = section_a_dir(model)
+
+    wsi = _open_wsi(wsi_path)
+    try:
+        # (a) Raw H&E crop of the whole ROI window, with a scale bar.
+        try:
+            raw = wsi.read_region((x0, y0), 0, (w, h)).convert("RGB")
+        except Exception as exc:  # noqa: BLE001
+            raise VisualizationError(f"read_region failed for ROI window: {exc}")
+        raw_disp = _fit_max(raw, ROI_RAW_MAX_PX)
+        mpp = _wsi_mpp(wsi)
+        if mpp:
+            _draw_scale_bar(raw_disp, mpp * (raw.width / raw_disp.width))
+        raw_path = out_dir / f"roi_raw_{stem}_{idx}.png"
+        raw_disp.save(str(raw_path), format="PNG", optimize=True)
+
+        # (b) The same region tiled as a grid of its patches, each tinted by
+        #     its prototype color (same cmap as the assignment map).
+        grid_img = Image.new(
+            "RGB", (ROI_GRID * ROI_CELL_PX, ROI_GRID * ROI_CELL_PX), color=(255, 255, 255)
+        )
+        for i in member_idxs:
+            cx, cy = int(coords[i][0]), int(coords[i][1])
+            col = (cx - x0) // cell
+            row = (cy - y0) // cell
+            if not (0 <= col < ROI_GRID and 0 <= row < ROI_GRID):
+                continue
+            try:
+                patch = (
+                    wsi.read_region((cx, cy), 0, (cell, cell))
+                    .convert("RGB")
+                    .resize((ROI_CELL_PX, ROI_CELL_PX), Image.Resampling.BILINEAR)
+                )
+            except Exception as exc:  # noqa: BLE001 — one bad patch shouldn't kill the grid
+                logger.warning("roi: read_region failed for patch %s: %s", i, exc)
+                continue
+            color = tuple(int(c) for c in cmap[int(labels[i])][:3])
+            tint = Image.new("RGB", (ROI_CELL_PX, ROI_CELL_PX), color=color)
+            blended = Image.blend(patch, tint, ROI_TINT_ALPHA)
+            grid_img.paste(blended, (col * ROI_CELL_PX, row * ROI_CELL_PX))
+        colored_path = out_dir / f"roi_colored_{stem}_{idx}.png"
+        grid_img.save(str(colored_path), format="PNG", optimize=True)
+    finally:
+        _close_wsi(wsi)
+
+    return raw_path, colored_path, [int(x0), int(y0), int(w), int(h)], idx, n
+
+
+def render_roi(
+    model: Model,
+    h5_path: Path,
+    wsi_path: Path,
+    roi_index: int = 0,
+) -> tuple[Path, Path, list[int]]:
+    """Compute assignments for one slide, then render the `roi_index`-th ROI.
+
+    Convenience wrapper around `render_roi_from_assignments` that runs the
+    encoder. Returns `(roi_raw_path, roi_colored_path, [x, y, w, h])`.
+    """
+    encoder = _load_panther_encoder(model)
+    coords, feats, patch_size = _load_h5(h5_path)
+    cluster_labels, _qq, _probs = _compute_assignments(encoder, feats)
+    raw, colored, bbox, _idx, _n = render_roi_from_assignments(
+        model, coords, cluster_labels, patch_size, wsi_path, roi_index=roi_index
+    )
+    return raw, colored, bbox
+
+
+# ---------------------------------------------------------------------------
+# Section A repick cache (coords + labels for the chosen slide)
+# ---------------------------------------------------------------------------
+
+
+def save_section_a_cache(model: Model, slide_id: str, coords, cluster_labels, patch_size: int) -> None:
+    """Persist the Section A slide's coords/labels so ROI repick can re-tile
+    without re-running the encoder. Writes a small .npz + .json sidecar under
+    section_a/."""
+    import numpy as np  # noqa: WPS433
+
+    d = section_a_dir(model)
+    np.savez(
+        str(d / "roi_cache.npz"),
+        coords=np.asarray(coords),
+        cluster_labels=np.asarray(cluster_labels),
+    )
+    (d / "roi_cache.json").write_text(
+        json.dumps({"slide_id": slide_id, "patch_size": int(patch_size)})
+    )
+
+
+def load_section_a_cache(model: Model):
+    """Load the cached Section A assignments.
+
+    Returns `(slide_id, coords, cluster_labels, patch_size)`. Raises
+    VisualizationError if the cache is missing (caller maps that to a 409).
+    """
+    import numpy as np  # noqa: WPS433
+
+    d = section_a_dir(model)
+    npz_path = d / "roi_cache.npz"
+    meta_path = d / "roi_cache.json"
+    if not npz_path.is_file() or not meta_path.is_file():
+        raise VisualizationError(
+            "Section A cache not found — render the model's visualizations first."
+        )
+    data = np.load(str(npz_path))
+    meta = json.loads(meta_path.read_text())
+    return meta["slide_id"], data["coords"], data["cluster_labels"], int(meta["patch_size"])
+
+
+# ---------------------------------------------------------------------------
 # Small utilities
 # ---------------------------------------------------------------------------
 
@@ -676,6 +994,97 @@ def _close_fig(fig) -> None:
     import matplotlib.pyplot as plt  # noqa: WPS433
 
     plt.close(fig)
+
+
+def _close_wsi(wsi) -> None:
+    try:
+        wsi.close()
+    except Exception:  # noqa: BLE001 — some backends lack/raise on close
+        pass
+
+
+def _wsi_mpp(wsi) -> float | None:
+    """Microns-per-pixel at level 0 from openslide's MPP_X property, or None."""
+    import openslide  # noqa: WPS433
+
+    try:
+        raw = wsi.properties.get(openslide.PROPERTY_NAME_MPP_X)
+        return float(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _fit_max(img, max_px: int):
+    """Downscale a PIL image so its longest side is <= max_px (no upscaling)."""
+    from PIL import Image  # noqa: WPS433
+
+    longest = max(img.width, img.height)
+    if longest <= max_px:
+        return img
+    scale = max_px / longest
+    return img.resize(
+        (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
+        Image.Resampling.BILINEAR,
+    )
+
+
+def _nice_scale_length(target_um: float) -> float:
+    """Snap a target micron length to the nearest 'nice' 1/2/5×10ⁿ value <= target."""
+    if target_um <= 0:
+        return 0.0
+    exp = math.floor(math.log10(target_um))
+    base = 10 ** exp
+    for mult in (5, 2, 1):
+        if mult * base <= target_um:
+            return float(mult * base)
+    return float(base)
+
+
+def _format_scale_label(um: float) -> str:
+    if um >= 1000:
+        return f"{um / 1000:g} mm"
+    return f"{um:g} µm"
+
+
+def _draw_scale_bar(img, um_per_pixel: float, *, frac: float = 0.22) -> None:
+    """Draw a physical scale bar (bottom-left) onto a PIL RGB image in place.
+
+    `um_per_pixel` is the microns spanned by one pixel of `img`. The bar length
+    is snapped to a 'nice' value (~`frac` of the image width). No-op if the
+    image is too small to host a sensible bar.
+    """
+    from PIL import ImageDraw, ImageFont  # noqa: WPS433
+
+    if not um_per_pixel or um_per_pixel <= 0:
+        return
+    target_um = um_per_pixel * img.width * frac
+    bar_um = _nice_scale_length(target_um)
+    if bar_um <= 0:
+        return
+    bar_px = bar_um / um_per_pixel
+    if bar_px < 8 or bar_px > img.width * 0.9:
+        return
+
+    draw = ImageDraw.Draw(img)
+    margin = max(6, img.width // 40)
+    bar_h = max(3, img.height // 120)
+    x1 = margin
+    x2 = margin + bar_px
+    y = img.height - margin
+    # Dark outline then white fill so the bar reads on light or dark tissue.
+    draw.rectangle([x1 - 1, y - bar_h - 1, x2 + 1, y + 1], fill=(0, 0, 0))
+    draw.rectangle([x1, y - bar_h, x2, y], fill=(255, 255, 255))
+
+    label = _format_scale_label(bar_um)
+    try:
+        font = ImageFont.load_default()
+    except Exception:  # noqa: BLE001
+        font = None
+    text_y = y - bar_h - 2
+    # Cheap text outline: draw black offsets, then white on top.
+    for dx, dy in ((-1, -1), (1, -1), (-1, 1), (1, 1)):
+        draw.text((x1 + dx, text_y - 11 + dy), label, fill=(0, 0, 0), font=font, anchor="lb")
+    draw.text((x1, text_y - 11), label, fill=(255, 255, 255), font=font, anchor="lb")
 
 
 # ---------------------------------------------------------------------------

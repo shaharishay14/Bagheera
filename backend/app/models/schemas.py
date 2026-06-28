@@ -130,6 +130,9 @@ class ModelInfo(BaseModel):
     topk_grid_path: Optional[str] = None
     topk_per_proto: int = 3
     umap_path: Optional[str] = None
+    # Analysis-page artifacts, parsed from the model's viz_artifacts JSON column.
+    # Currently holds {"section_a": {...}}; null until viz has rendered it.
+    viz_artifacts: Optional[dict] = None
 
     model_config = {"from_attributes": True}
 

@@ -6,6 +6,7 @@ import JobStatusPoller from '../components/JobStatusPoller';
 import NotesThread from '../components/NotesThread';
 import PrototypeLabels from '../components/PrototypeLabels';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
+import SectionAPanel from '../components/SectionAPanel';
 import {
   ApiError,
   deleteModelGroup,
@@ -367,31 +368,9 @@ function FoldRow({
 }
 
 function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefresh: () => void }) {
-  const previewIds = model.preview_slide_ids ?? [];
-  const previews = previewIds.length > 0 ? previewIds : ['Slide 1', 'Slide 2', 'Slide 3'];
   return (
     <div className="space-y-5 border-t border-border bg-surface-subtle p-4">
-      <section>
-        <SectionHeader title="On 3 example slides" />
-        <div className="mt-2 grid grid-cols-1 gap-3 sm:grid-cols-3">
-          {previews.slice(0, 3).map((_label, i) => (
-            <img
-              key={i}
-              src={resolveVizUrl(
-                model.preview_heatmap_paths?.[i],
-                () => vizPlaceholderUrl('heatmap', { label: `Heatmap ${i + 1}`, width: 360, height: 240 })
-              )}
-              alt={`Heatmap ${i + 1}`}
-              className="w-full rounded border border-border bg-surface"
-            />
-          ))}
-        </div>
-        {model.viz_status !== 'ready' ? (
-          <p className="mt-1 text-[11px] text-ink-faint">
-            Placeholders shown while viz finishes rendering.
-          </p>
-        ) : null}
-      </section>
+      <SectionAPanel model={model} />
 
       <section>
         <SectionHeader title="Representative patches" />
