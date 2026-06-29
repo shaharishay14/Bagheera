@@ -1,12 +1,3 @@
-# Bagheera — single-machine GPU deployment.
-#
-#   cp .env.example .env   # then fill in WSI_DATA_DIR, STATE_DIR, CUDA tag, HF_TOKEN
-#   docker compose build
-#   docker compose up -d
-#   open http://localhost:8080
-#
-# Requires the NVIDIA Container Toolkit on the host (see docs/docker.md).
-
 services:
   backend:
     build:
@@ -18,31 +9,18 @@ services:
         TRIDENT_REF: ${TRIDENT_REF:-main}
         PANTHER_REF: ${PANTHER_REF:-main}
     env_file: .env
-    # PyTorch DataLoader workers communicate over /dev/shm. Docker's 64MB default
-    # triggers "Unexpected bus error … insufficient shared memory (shm)" during
-    # TRIDENT segmentation/feature extraction. `ipc: host` shares the host's
-    # shared memory directly (no fixed cap) — the most robust fix. If you prefer
-    # an isolated cap instead, remove `ipc: host` and use `shm_size: "16gb"`.
     ipc: host
     environment:
-      # Make all host GPUs visible; the app pins CUDA_VISIBLE_DEVICES from .env.
       NVIDIA_VISIBLE_DEVICES: all
       NVIDIA_DRIVER_CAPABILITIES: compute,utility
     volumes:
-      # WSI slides — read-only; must be listed in TRIDENT_ALLOWED_ROOTS as /data.
       - ${WSI_DATA_DIR}:/data:ro
-      # Persistent writable state (survives rebuilds). Paths match .env's *_ROOT vars.
-      - ${STATE_DIR}/db:/state/db
-      - ${STATE_DIR}/viz_cache:/state/viz_cache
-      - ${STATE_DIR}/inference_outputs:/state/inference_outputs
-      # K-fold splits AND trained PANTHER prototypes (.pkl) are written here by the app.
-      # PANTHER prepends 'splits/' to --split_dir, so the real on-disk location is
-      # $PANTHER_REPO_PATH/src/splits/datasets_splits. Mount it onto the host so trained
-      # models survive `docker compose down` / rebuild.
-      - ${STATE_DIR}/datasets_splits:/opt/PANTHER/src/splits/datasets_splits
-      - ${STATE_DIR}/hf_cache:/state/hf_cache
-      # TRIDENT initial-dataset outputs (hardcoded to ./trident_processed, cwd=/app/backend).
-      - ${STATE_DIR}/trident_processed:/app/backend/trident_processed
+      - ${STATE_DIR_INTERNAL}/db:/state/db
+      - ${STATE_DIR_INTERNAL}/hf_cache:/state/hf_cache
+      - ${STATE_DIR_EXTERNAL}/viz_cache:/state/viz_cache
+      - ${STATE_DIR_EXTERNAL}/inference_outputs:/state/inference_outputs
+      - ${STATE_DIR_EXTERNAL}/datasets_splits:/opt/PANTHER/src/splits/datasets_splits
+      - ${STATE_DIR_EXTERNAL}/trident_processed:/app/backend/trident_processed
     deploy:
       resources:
         reservations:
