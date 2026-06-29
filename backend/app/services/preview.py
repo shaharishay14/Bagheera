@@ -16,15 +16,15 @@ PREVIEW_SLIDE_COUNT = 3
 SLIDE_ID_COLUMNS = {"slide_id", "case_id", "slide", "id"}
 
 
-def read_slide_ids_from_train_csv(split_dir_abs: str) -> list[str]:
-    """Read the slide-identifier column out of `{split_dir_abs}/train.csv`.
+def read_slide_ids_from_csv(split_dir_abs: str, filename: str) -> list[str]:
+    """Read the slide-identifier column out of `{split_dir_abs}/{filename}`.
 
-    Returns [] on any error so callers can degrade gracefully (the UI will
-    fall back to placeholder thumbnails). Tolerates a missing header or an
-    unconventional first-column name.
+    Returns [] on any error so callers can degrade gracefully. Tolerates a
+    missing header or an unconventional first-column name. Used for train.csv
+    (preview slides) and val.csv (Section B validation consistency).
     """
     try:
-        csv_path = Path(split_dir_abs) / "train.csv"
+        csv_path = Path(split_dir_abs) / filename
         if not csv_path.is_file():
             return []
         with csv_path.open(newline="") as f:
@@ -40,6 +40,12 @@ def read_slide_ids_from_train_csv(split_dir_abs: str) -> list[str]:
             return [row[id_idx] for row in reader if len(row) > id_idx and row[id_idx]]
     except OSError:
         return []
+
+
+def read_slide_ids_from_train_csv(split_dir_abs: str) -> list[str]:
+    """Slide IDs from `{split_dir_abs}/train.csv` (the UI falls back to
+    placeholder thumbnails on []). Thin wrapper over `read_slide_ids_from_csv`."""
+    return read_slide_ids_from_csv(split_dir_abs, "train.csv")
 
 
 def pick_preview_slides(model: Model, count: int = PREVIEW_SLIDE_COUNT) -> list[str]:

@@ -13,7 +13,9 @@ Runs after a fold model finishes training. For one Model row:
   6. Render the Section C on-tissue 2D-embedding map for the SAME deterministic
      Section-A slide → merged into Model.viz_artifacts under the `section_c` key
      ({"slide_id", "scatter": model.umap_path, "on_tissue": <new path>}).
-  7. Flip Model.viz_status to 'ready' (or 'failed' if every render blew up).
+  7. Render Section B validation consistency (encoder over the fold's val + sampled
+     train slides) → merged under the `section_b` key. Skipped if no val slides.
+  8. Flip Model.viz_status to 'ready' (or 'failed' if every render blew up).
 
 Per-step failures are caught and logged into the job log; the handler keeps
 going so a partial render still publishes whatever succeeded. If at least
@@ -157,6 +159,18 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
         failures.append(f"section_c: {exc}")
         log.write(f"  FAILED section_c: {exc}\n{traceback.format_exc()}")
 
+    # --- Section B (validation-slide prototype consistency) -----------------
+    # Heaviest render — runs the encoder over the fold's val slides (+ sampled
+    # train slides). Skipped gracefully when the fold has no validation slides.
+    section_b: dict | None = None
+    try:
+        section_b = _render_section_b(model, log)
+        if section_b:
+            successes += 1
+    except Exception as exc:  # noqa: BLE001 — never let Section B abort the rest
+        failures.append(f"section_b: {exc}")
+        log.write(f"  FAILED section_b: {exc}\n{traceback.format_exc()}")
+
     # --- Commit results -----------------------------------------------------
     model.preview_heatmap_paths = json.dumps(heatmap_paths) if heatmap_paths else None
     model.umap_path = umap_path
@@ -177,6 +191,8 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
         artifacts["section_d"] = section_d
     if section_c:
         artifacts["section_c"] = section_c
+    if section_b:
+        artifacts["section_b"] = section_b
     model.viz_artifacts = json.dumps(artifacts) if artifacts else None
 
     model.viz_status = "ready" if successes > 0 else "failed"
@@ -322,6 +338,30 @@ def _render_section_c(model: Model, db: Session, wsi_dir, umap_path, log: JobLog
     log.write(f"    on_tissue: {out}")
 
     return {"slide_id": slide_id, "scatter": umap_path, "on_tissue": str(out)}
+
+
+def _render_section_b(model: Model, log: JobLog) -> dict | None:
+    """Render Section B (validation-slide prototype consistency).
+
+    Returns the `section_b` dict to merge under model.viz_artifacts, or None when
+    the fold has no usable validation slides (a graceful skip — not a failure).
+    Any other error propagates to the handler's try/except and is logged.
+    """
+    from pathlib import Path
+
+    try:
+        section_b = visualization.render_validation_consistency(
+            model, Path(model.features_dir)
+        )
+    except visualization.VisualizationError as exc:
+        log.write(f"  section_b: skipped ({exc})")
+        return None
+
+    log.write(
+        f"  section_b: violin+usage over {section_b['n_val_slides']} val / "
+        f"{section_b['n_train_slides']} train slides"
+    )
+    return section_b
 
 
 def _resolve_preview_slide_ids(model: Model) -> list[str]:

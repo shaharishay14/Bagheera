@@ -240,6 +240,33 @@ def _load_panther_encoder(model: Model):
     return encoder
 
 
+def _load_prototype_centers(model: Model) -> "np.ndarray":  # type: ignore[name-defined]
+    """Load this fold's trained prototype centers as (n_proto, embed_dim) float32.
+
+    PANTHER writes the prototypes as a pickled ``{'prototypes': ndarray}`` (see
+    assumption #1); a few configs save a bare ``.npy``. We read the centers
+    directly — no encoder needed — so Section B can measure how close held-out
+    patches land to them.
+    """
+    import numpy as np  # noqa: WPS433
+
+    proto_path = _select_prototype_path(model)
+    if proto_path.suffix == ".npy":
+        arr = np.load(proto_path, allow_pickle=True)
+    else:
+        import pickle  # noqa: WPS433
+
+        with open(proto_path, "rb") as f:
+            data = pickle.load(f)
+        arr = data["prototypes"] if isinstance(data, dict) else data
+    if hasattr(arr, "detach"):  # torch.Tensor
+        arr = arr.detach().cpu().numpy()
+    arr = np.asarray(arr, dtype=np.float32).squeeze()
+    if arr.ndim != 2:
+        arr = arr.reshape(model.n_proto, -1)
+    return arr
+
+
 # ---------------------------------------------------------------------------
 # H5 + WSI helpers
 # ---------------------------------------------------------------------------
@@ -1465,3 +1492,153 @@ def resolve_dataset_wsi_dir(model: Model, db) -> Path | None:
         return None
     p = Path(run.wsi_dir)
     return p if p.is_dir() else None
+
+
+# ---------------------------------------------------------------------------
+# Section B — validation-slide prototype consistency
+# ---------------------------------------------------------------------------
+
+TRAIN_USAGE_SAMPLE_CAP = 50  # cap train slides scanned for the usage average
+
+
+def render_validation_consistency(model: Model, features_dir: Path) -> dict:
+    """Section B — how the fold's prototypes hold up on its held-out validation slides.
+
+    The heaviest renderer: runs the PANTHER encoder over every validation slide
+    and a deterministic sample of training slides (capped at TRAIN_USAGE_SAMPLE_CAP).
+    Produces two PNGs under viz_cache/{model_id}/section_b/:
+
+      - violin.png: per prototype, the distribution of cosine similarity between
+        each validation patch assigned to that prototype and the prototype's
+        trained center, colored by prototype, with the per-prototype patch count
+        annotated. Tight + high → the prototype generalizes; wide/low → it drifts.
+      - usage.png: train-vs-val prototype usage — the mean GMM mixture weight π_c
+        per prototype across each set (grouped bars).
+
+    Returns {"violin", "usage", "n_val_slides", "n_train_slides"}. Raises
+    VisualizationError when the fold has no usable validation slides (the
+    post_train_viz handler treats that as a graceful skip, not a failure).
+    """
+    import random  # noqa: WPS433
+
+    import matplotlib.pyplot as plt  # noqa: WPS433
+    import numpy as np  # noqa: WPS433
+
+    from app.services.preview import read_slide_ids_from_csv
+    from visualization.prototype_visualization_utils import get_default_cmap  # type: ignore[import-not-found]
+
+    val_ids = read_slide_ids_from_csv(model.split_dir_abs, "val.csv")
+    if not val_ids:
+        raise VisualizationError("fold has no validation slides (val.csv missing/empty)")
+    train_ids = read_slide_ids_from_csv(model.split_dir_abs, "train.csv")
+
+    n_proto = model.n_proto
+    centers = _load_prototype_centers(model)  # (n_proto, dim)
+    centers_norm = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-8)
+    encoder = _load_panther_encoder(model)
+
+    # --- Validation pass: per-prototype cosine-sim distribution + usage ------
+    val_sims: list[list[float]] = [[] for _ in range(n_proto)]
+    val_usage = np.zeros(n_proto, dtype=np.float64)
+    n_val_used = 0
+    for sid in val_ids:
+        h5 = features_dir / f"{sid}.h5"
+        if not h5.is_file():
+            continue
+        _coords, feats, _ps = _load_h5(h5)
+        labels, _qq, mix = _compute_assignments(encoder, feats)
+        feats_np = feats.detach().cpu().numpy()
+        feats_norm = feats_np / (np.linalg.norm(feats_np, axis=1, keepdims=True) + 1e-8)
+        # cosine of each patch to the center it was assigned to
+        sims = np.einsum("ij,ij->i", feats_norm, centers_norm[labels])
+        for c in range(n_proto):
+            m = labels == c
+            if m.any():
+                val_sims[c].extend(sims[m].astype(float).tolist())
+        val_usage += np.asarray(mix, dtype=np.float64)
+        n_val_used += 1
+    if n_val_used == 0:
+        raise VisualizationError("no validation slide had a matching .h5 feature file")
+    val_usage /= n_val_used
+
+    # --- Train usage (sampled, deterministic) -------------------------------
+    sampled = train_ids
+    if len(train_ids) > TRAIN_USAGE_SAMPLE_CAP:
+        sampled = sorted(random.Random(f"{model.id}:section_b").sample(train_ids, TRAIN_USAGE_SAMPLE_CAP))
+    train_usage = np.zeros(n_proto, dtype=np.float64)
+    n_train_used = 0
+    for sid in sampled:
+        h5 = features_dir / f"{sid}.h5"
+        if not h5.is_file():
+            continue
+        _coords, feats, _ps = _load_h5(h5)
+        _labels, _qq, mix = _compute_assignments(encoder, feats)
+        train_usage += np.asarray(mix, dtype=np.float64)
+        n_train_used += 1
+    if n_train_used:
+        train_usage /= n_train_used
+
+    cmap = get_default_cmap(n_proto)
+    proto_colors = [tuple(c / 255 for c in cmap[i]) for i in range(n_proto)]
+    xticks = list(range(1, n_proto + 1))
+    xlabels = [f"C{i + 1}" for i in range(n_proto)]
+    rot = 45 if n_proto > 12 else 0
+    fig_w = max(6.0, n_proto * 0.6)
+
+    out_dir = _viz_dir(model, "section_b")
+
+    # --- violin.png ---------------------------------------------------------
+    counts = [len(val_sims[c]) for c in range(n_proto)]
+    positions = [c + 1 for c in range(n_proto) if counts[c] > 0]
+    datasets = [val_sims[c] for c in range(n_proto) if counts[c] > 0]
+
+    fig, ax = plt.subplots(figsize=(fig_w, 4.5), dpi=120)
+    if datasets:
+        parts = ax.violinplot(datasets, positions=positions, showmedians=True, widths=0.8)
+        for body, pos in zip(parts["bodies"], positions):
+            body.set_facecolor(proto_colors[pos - 1])
+            body.set_edgecolor("#333333")
+            body.set_alpha(0.85)
+        for key in ("cbars", "cmins", "cmaxes", "cmedians"):
+            if key in parts:
+                parts[key].set_edgecolor("#333333")
+                parts[key].set_linewidth(1.0)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xlabels, rotation=rot, fontsize=8)
+    ax.set_ylabel("cosine sim to prototype center")
+    ax.set_title(f"Validation patch → prototype consistency ({n_val_used} val slides)")
+    ax.set_ylim(-0.05, 1.08)
+    for c in range(n_proto):
+        ax.text(c + 1, 1.03, f"n={counts[c]}", ha="center", va="bottom",
+                fontsize=6, rotation=90, color="#555555")
+    ax.grid(axis="y", alpha=0.2)
+    fig.tight_layout()
+    violin_path = out_dir / "violin.png"
+    fig.savefig(violin_path)
+    plt.close(fig)
+
+    # --- usage.png ----------------------------------------------------------
+    fig2, ax2 = plt.subplots(figsize=(fig_w, 4.0), dpi=120)
+    xs = np.arange(n_proto)
+    w = 0.4
+    ax2.bar(xs - w / 2, train_usage, w, label=f"train (n={n_train_used})",
+            color="#9ecae1", edgecolor="#333333", linewidth=0.4)
+    ax2.bar(xs + w / 2, val_usage, w, label=f"val (n={n_val_used})",
+            color="#fdae6b", edgecolor="#333333", linewidth=0.4)
+    ax2.set_xticks(xs)
+    ax2.set_xticklabels(xlabels, rotation=rot, fontsize=8)
+    ax2.set_ylabel(r"Proportion $\pi_c$")
+    ax2.set_title("Prototype usage — train vs validation")
+    ax2.legend(fontsize=8)
+    ax2.grid(axis="y", alpha=0.2)
+    fig2.tight_layout()
+    usage_path = out_dir / "usage.png"
+    fig2.savefig(usage_path)
+    plt.close(fig2)
+
+    return {
+        "violin": str(violin_path),
+        "usage": str(usage_path),
+        "n_val_slides": n_val_used,
+        "n_train_slides": n_train_used,
+    }

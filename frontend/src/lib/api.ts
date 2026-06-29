@@ -184,6 +184,32 @@ export interface SectionA {
 }
 
 /**
+ * Section B of the per-fold Analysis view — validation-consistency charts that
+ * show how the trained prototypes generalize to the fold's held-out (validation)
+ * slides:
+ *
+ *   - `usage`  — train-vs-val π_c grouped bars (do prototypes get used at the
+ *                same rate on unseen slides?).
+ *   - `violin` — per-prototype distribution of validation cosine similarities,
+ *                annotated with per-prototype counts (can grow tall/wide with
+ *                many prototypes → render zoomable).
+ *
+ * The whole object is **absent when the fold has no validation slides** — show a
+ * muted note, never a broken image. Individual images may also be absent
+ * (partial success) → resolve via `resolveVizUrl` and degrade to a placeholder.
+ */
+export interface SectionB {
+  /** Viz path: per-prototype val cosine-similarity distribution (+ counts). */
+  violin?: string;
+  /** Viz path: train-vs-val π_c grouped bars. */
+  usage?: string;
+  /** Number of held-out (validation) slides this fold was evaluated on. */
+  n_val_slides?: number;
+  /** Number of training slides sampled for the train-side comparison. */
+  n_train_slides?: number;
+}
+
+/**
  * Section D of the per-fold Analysis view — the PANTHER-paper prototype
  * "dictionary": one column per prototype, each headed `C{index+1}` in the
  * prototype's color and showing `per_proto` example patches. Every prototype is
@@ -225,6 +251,7 @@ export interface SectionC {
 
 export interface VizArtifacts {
   section_a?: SectionA;
+  section_b?: SectionB;
   section_c?: SectionC;
   section_d?: SectionD;
 }

@@ -6,6 +6,7 @@ import JobStatusPoller from '../components/JobStatusPoller';
 import NotesThread from '../components/NotesThread';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import SectionAPanel from '../components/SectionAPanel';
+import SectionBPanel from '../components/SectionBPanel';
 import SectionCPanel from '../components/SectionCPanel';
 import SectionDPanel from '../components/SectionDPanel';
 import {
@@ -372,6 +373,8 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
   return (
     <div className="space-y-5 border-t border-border bg-surface-subtle p-4">
       <SectionAPanel model={model} />
+
+      <SectionBPanel model={model} />
 
       <SectionDPanel model={model} />
 

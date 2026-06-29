@@ -177,7 +177,7 @@ The three real handlers:
 | Handler | File | Does |
 | --- | --- | --- |
 | `panther_train` | `panther_train.py` | For a Model Group, runs K PANTHER subprocesses sequentially (one `PantherRun` row each); sets each Model `ready`/`failed`; enqueues a `post_train_viz` per successful fold. |
-| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the **Section D** prototype dictionary (supersedes the top-K grid — `topk_grid_path` is no longer set), the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`), and the **Section C** on-tissue 2D-embedding map (`render_umap_on_tissue` for that same slide); merges all into `model.viz_artifacts={"section_a":{...},"section_c":{...},"section_d":{...}}` (load-merge-dump, never clobbering a sibling section) + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
+| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the **Section D** prototype dictionary (supersedes the top-K grid — `topk_grid_path` is no longer set), the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`), the **Section C** on-tissue 2D-embedding map (`render_umap_on_tissue` for that same slide), and the **Section B** validation-consistency charts (`render_validation_consistency` — encoder over the fold's val + sampled train slides; skipped if no val slides); merges all into `model.viz_artifacts={"section_a":{...},"section_b":{...},"section_c":{...},"section_d":{...}}` (load-merge-dump, never clobbering a sibling section) + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
 | `inference` | `inference_job.py` | For one Inference: hash slide → run TRIDENT → locate `.h5` → render heatmap/mixture/example-patches/t-SNE → `ready` if ≥1 render succeeded. |
 
 ---
@@ -250,6 +250,7 @@ hardcoded-`n_proto` bug, and:
 | `render_prototype_dictionary(model, feats_dir, wsi_dir, per_proto=3)` | dataset-wide | per-patch PNGs under `section_d/proto_{c:02d}/patch_{rank:02d}.png` + a `dict` (Section D) |
 | `render_umap(model, feats_dir)` | dataset-wide | `umap.png` (abstract scatter; sets `model.umap_path`) |
 | `render_umap_on_tissue(model, h5, wsi, *, downsample_target=SECTION_C_DOWNSAMPLE=24, out_path=None)` | per-slide | `section_c/umap_on_tissue_{stem}.png` (Section C — on-tissue 2D-embedding map) |
+| `render_validation_consistency(model, feats_dir)` | fold val + sampled train | `section_b/violin.png` + `section_b/usage.png` + a `dict` (Section B). Heaviest render — runs the encoder over every val slide and ≤`TRAIN_USAGE_SAMPLE_CAP`=50 train slides. Per prototype: violin of val-patch cosine-sim to the trained center (+ counts) and train-vs-val π_c usage bars. Raises `VisualizationError` (graceful skip) when the fold has no val slides. |
 
 **`render_prototype_dictionary` (Section D — prototype dictionary).** Selects the
 top `per_proto` patches **per prototype** across the dataset with the *same*
@@ -379,6 +380,18 @@ The Section D (prototype dictionary) shape rides alongside under the `section_d`
     "prototypes": [
       { "index": 0, "color": "#rrggbb", "patches": ["<abs viz path>", "..."] }
     ]
+} }
+```
+
+The Section B (validation consistency) shape under the `section_b` key (absent when
+the fold has no validation slides):
+
+```json
+{ "section_b": {
+    "violin": "<abs viz path>",
+    "usage": "<abs viz path>",
+    "n_val_slides": 12,
+    "n_train_slides": 40
 } }
 ```
 
