@@ -183,8 +183,30 @@ export interface SectionA {
   roi_index?: number;
 }
 
+/**
+ * Section D of the per-fold Analysis view — the PANTHER-paper prototype
+ * "dictionary": one column per prototype, each headed `C{index+1}` in the
+ * prototype's color and showing `per_proto` example patches. Every prototype is
+ * present; one with no mined patches carries an empty `patches` array (still
+ * render its column). Each patch entry is a viz_cache path — resolve via
+ * `resolveVizUrl` and degrade to a placeholder when missing.
+ */
+export interface SectionD {
+  /** Number of example patches rendered per prototype column. */
+  per_proto: number;
+  prototypes: {
+    /** Zero-based prototype index (column header shows `index + 1`). */
+    index: number;
+    /** Per-prototype color as `#rrggbb`, matching the assignment map. */
+    color: string;
+    /** Viz-cache paths for this prototype's example patches (may be empty). */
+    patches: string[];
+  }[];
+}
+
 export interface VizArtifacts {
   section_a?: SectionA;
+  section_d?: SectionD;
 }
 
 export interface ModelInfo {

@@ -4,10 +4,13 @@ Runs after a fold model finishes training. For one Model row:
   1. Pick (or reuse) the 3 preview slide IDs from the fold's train.csv.
   2. For each preview slide, render an assignment heatmap → store paths in
      Model.preview_heatmap_paths (JSON list).
-  3. Render the dataset-wide top-K representative-patches grid →
-     Model.topk_grid_path.
+  3. Render the dataset-wide prototype dictionary (Section D) → merged into
+     Model.viz_artifacts under the `section_d` key (supersedes the old
+     top-K grid; `render_topk_grid` is left in place but no longer called).
   4. Render the dataset-wide UMAP → Model.umap_path.
-  5. Flip Model.viz_status to 'ready' (or 'failed' if every render blew up).
+  5. Render the Section A per-slide panel → merged into Model.viz_artifacts
+     under the `section_a` key.
+  6. Flip Model.viz_status to 'ready' (or 'failed' if every render blew up).
 
 Per-step failures are caught and logged into the job log; the handler keeps
 going so a partial render still publishes whatever succeeded. If at least
@@ -90,24 +93,29 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
                 failures.append(f"heatmap[{slide_id}]: {exc}")
                 log.write(f"  FAILED heatmap for {slide_id}: {exc}\n{traceback.format_exc()}")
 
-    # --- Top-K grid (dataset-wide) ------------------------------------------
-    topk_grid_path: str | None = None
+    # --- Prototype dictionary / Section D (dataset-wide) --------------------
+    # Supersedes the old composite top-K grid: one PNG per representative patch,
+    # plus each prototype's assignment-map color, so the UI can render per-column.
+    section_d: dict | None = None
     if wsi_dir is not None:
         try:
             from pathlib import Path
 
-            out = visualization.render_topk_grid(
+            section_d = visualization.render_prototype_dictionary(
                 model,
                 Path(model.features_dir),
                 wsi_dir,
                 per_proto=model.topk_per_proto or 3,
             )
-            topk_grid_path = str(out)
             successes += 1
-            log.write(f"  topk_grid: {out}")
+            n_with_patches = sum(1 for p in section_d["prototypes"] if p["patches"])
+            log.write(
+                f"  section_d: {len(section_d['prototypes'])} prototypes, "
+                f"{n_with_patches} with patches, per_proto={section_d['per_proto']}"
+            )
         except Exception as exc:  # noqa: BLE001
-            failures.append(f"topk_grid: {exc}")
-            log.write(f"  FAILED topk_grid: {exc}\n{traceback.format_exc()}")
+            failures.append(f"section_d: {exc}")
+            log.write(f"  FAILED section_d: {exc}\n{traceback.format_exc()}")
 
     # --- UMAP (dataset-wide, no WSI needed) ---------------------------------
     umap_path: str | None = None
@@ -134,10 +142,24 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
 
     # --- Commit results -----------------------------------------------------
     model.preview_heatmap_paths = json.dumps(heatmap_paths) if heatmap_paths else None
-    model.topk_grid_path = topk_grid_path
     model.umap_path = umap_path
+
+    # Merge into the existing viz_artifacts JSON so section_a and section_d ride
+    # along together — never clobber a previously-rendered section.
+    artifacts: dict = {}
+    if model.viz_artifacts:
+        try:
+            loaded = json.loads(model.viz_artifacts)
+            if isinstance(loaded, dict):
+                artifacts = loaded
+        except json.JSONDecodeError:
+            artifacts = {}
     if section_a:
-        model.viz_artifacts = json.dumps({"section_a": section_a})
+        artifacts["section_a"] = section_a
+    if section_d:
+        artifacts["section_d"] = section_d
+    model.viz_artifacts = json.dumps(artifacts) if artifacts else None
+
     model.viz_status = "ready" if successes > 0 else "failed"
     db.add(model)
     db.commit()

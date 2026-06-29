@@ -626,6 +626,130 @@ def render_topk_grid(
     return out_path
 
 
+def render_prototype_dictionary(
+    model: Model,
+    dataset_features_dir: Path,
+    dataset_wsi_dir: Path,
+    per_proto: int = 3,
+) -> dict:
+    """PANTHER-paper prototype dictionary — top patches + color per prototype.
+
+    Cross-slide. The dictionary view (Section D of the Analysis page) replaces
+    the single composite top-K grid: for each prototype C1..Cn we select the
+    `per_proto` most-representative patches across the whole dataset (identical
+    scoring to `render_topk_grid` — a per-prototype heap over the soft
+    assignment score `qq[:, c]`), but instead of compositing one PNG we write
+    each patch as its own image so the UI can lay them out per column and color
+    each column with the prototype's assignment-map color.
+
+    Output layout:
+        viz_cache/{model_id}/section_d/proto_{index:02d}/patch_{rank:02d}.png
+
+    Returns:
+        {
+          "per_proto": per_proto,
+          "prototypes": [
+            {"index": c, "color": "#rrggbb", "patches": ["<abs viz path>", ...]},
+            ...  # ALL c in range(n_proto); empty `patches` for prototypes with
+                 # no patches, so every column still renders.
+          ],
+        }
+    """
+    encoder = _load_panther_encoder(model)
+    features_dir = Path(dataset_features_dir)
+    if not features_dir.is_dir():
+        raise VisualizationError(f"dataset_features_dir does not exist: {features_dir}")
+
+    n_proto = model.n_proto
+
+    # heaps[c] = top `per_proto` (score, tiebreak, slide_stem, x, y, patch_size).
+    heaps: list[list[tuple]] = [[] for _ in range(n_proto)]
+    tiebreak = 0
+
+    for h5_file in _features_files_iter(features_dir):
+        try:
+            coords, feats, patch_size = _load_h5(h5_file)
+            _labels, qq, _probs = _compute_assignments(encoder, feats)
+        except Exception as exc:  # noqa: BLE001 — one bad slide shouldn't kill the dict
+            logger.warning("proto_dict: failed to process %s: %s", h5_file.name, exc)
+            continue
+
+        for proto_idx in range(n_proto):
+            scores = qq[:, proto_idx]
+            for patch_idx in _topk_indices(scores, per_proto):
+                score = float(scores[patch_idx])
+                x = int(coords[patch_idx][0])
+                y = int(coords[patch_idx][1])
+                entry = (score, tiebreak, h5_file.stem, x, y, patch_size)
+                tiebreak += 1
+                if len(heaps[proto_idx]) < per_proto:
+                    heapq.heappush(heaps[proto_idx], entry)
+                else:
+                    heapq.heappushpop(heaps[proto_idx], entry)
+
+    # Prototype colors from the SAME cmap the assignment map / π_c bars use.
+    _ensure_panther_on_syspath()
+    from visualization.prototype_visualization_utils import get_default_cmap  # type: ignore[import-not-found]
+
+    cmap = get_default_cmap(n_proto)
+
+    from PIL import Image  # noqa: WPS433
+
+    base_dir = _viz_dir(model, subdir="section_d")
+    cell_px = TOPK_DEFAULT_THUMB_PX
+    open_wsis: dict[str, object] = {}
+
+    prototypes: list[dict] = []
+    try:
+        for proto_idx in range(n_proto):
+            proto_dir = base_dir / f"proto_{proto_idx:02d}"
+            proto_dir.mkdir(parents=True, exist_ok=True)
+
+            ranked = sorted(heaps[proto_idx], key=lambda e: -e[0])  # best first
+            patch_paths: list[str] = []
+            for rank, (_score, _tb, slide_stem, x, y, patch_size) in enumerate(ranked):
+                wsi_path = resolve_wsi_path(slide_stem, dataset_wsi_dir)
+                if wsi_path is None:
+                    continue
+                if slide_stem not in open_wsis:
+                    try:
+                        open_wsis[slide_stem] = _open_wsi(wsi_path)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("proto_dict: cannot open %s: %s", wsi_path, exc)
+                        open_wsis[slide_stem] = None  # type: ignore[assignment]
+                wsi = open_wsis[slide_stem]
+                if wsi is None:
+                    continue
+                try:
+                    crop = wsi.read_region(  # type: ignore[union-attr]
+                        (x, y), 0, (patch_size, patch_size)
+                    ).convert("RGB")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("proto_dict: read_region failed for %s: %s", slide_stem, exc)
+                    continue
+                crop = crop.resize((cell_px, cell_px), Image.Resampling.BICUBIC)
+                out_path = proto_dir / f"patch_{rank:02d}.png"
+                crop.save(str(out_path), format="PNG", optimize=True)
+                patch_paths.append(str(out_path))
+
+            prototypes.append(
+                {
+                    "index": proto_idx,
+                    "color": _cmap_to_hex(cmap, proto_idx),
+                    "patches": patch_paths,
+                }
+            )
+    finally:
+        for wsi in open_wsis.values():
+            try:
+                if wsi is not None:
+                    wsi.close()  # type: ignore[union-attr]
+            except Exception:  # noqa: BLE001
+                pass
+
+    return {"per_proto": per_proto, "prototypes": prototypes}
+
+
 def render_umap(model: Model, dataset_features_dir: Path) -> Path:
     """UMAP of patch features across the dataset, colored by cluster.
 
@@ -988,6 +1112,17 @@ def _topk_indices(scores, k: int):
     # argpartition for large arrays, then sort the small slice for ordering.
     part = np.argpartition(-arr, k - 1)[:k]
     return part[np.argsort(-arr[part])].tolist()
+
+
+def _cmap_to_hex(cmap, index: int) -> str:
+    """Convert a `get_default_cmap` entry (RGB 0-255 triple) to '#rrggbb'.
+
+    Matches the colors the assignment map / π_c bars paint, so the UI can color
+    each prototype column and label box to agree with the heatmap.
+    """
+    rgb = cmap[int(index)][:3]
+    r, g, b = (max(0, min(255, int(round(float(c))))) for c in rgb)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 def _close_fig(fig) -> None:

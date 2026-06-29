@@ -4,9 +4,9 @@ import { FiTrash2 } from 'react-icons/fi';
 import JobLogViewer from '../components/JobLogViewer';
 import JobStatusPoller from '../components/JobStatusPoller';
 import NotesThread from '../components/NotesThread';
-import PrototypeLabels from '../components/PrototypeLabels';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import SectionAPanel from '../components/SectionAPanel';
+import SectionDPanel from '../components/SectionDPanel';
 import {
   ApiError,
   deleteModelGroup,
@@ -372,21 +372,7 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
     <div className="space-y-5 border-t border-border bg-surface-subtle p-4">
       <SectionAPanel model={model} />
 
-      <section>
-        <SectionHeader title="Representative patches" />
-        <img
-          src={resolveVizUrl(
-            model.topk_grid_path,
-            () => vizPlaceholderUrl('topk', {
-              label: `${model.n_proto}×${model.topk_per_proto} grid`,
-              width: 720,
-              height: 320,
-            })
-          )}
-          alt="Top-K grid"
-          className="mt-2 w-full rounded border border-border bg-surface"
-        />
-      </section>
+      <SectionDPanel model={model} />
 
       <section>
         <SectionHeader title="Across the dataset" />
@@ -398,13 +384,6 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
           alt="UMAP"
           className="mt-2 w-full rounded border border-border bg-surface"
         />
-      </section>
-
-      <section>
-        <SectionHeader title="Prototype labels" />
-        <div className="mt-2">
-          <PrototypeLabels modelId={model.id} nProto={model.n_proto} />
-        </div>
       </section>
 
       <section>

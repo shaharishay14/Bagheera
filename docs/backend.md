@@ -177,7 +177,7 @@ The three real handlers:
 | Handler | File | Does |
 | --- | --- | --- |
 | `panther_train` | `panther_train.py` | For a Model Group, runs K PANTHER subprocesses sequentially (one `PantherRun` row each); sets each Model `ready`/`failed`; enqueues a `post_train_viz` per successful fold. |
-| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the top-K grid, the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`); writes `model.viz_artifacts={"section_a":{...}}` + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
+| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the **Section D** prototype dictionary (supersedes the top-K grid — `topk_grid_path` is no longer set), the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`); merges both into `model.viz_artifacts={"section_a":{...},"section_d":{...}}` (load-merge-dump, never clobbering a sibling section) + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
 | `inference` | `inference_job.py` | For one Inference: hash slide → run TRIDENT → locate `.h5` → render heatmap/mixture/example-patches/t-SNE → `ready` if ≥1 render succeeded. |
 
 ---
@@ -246,8 +246,29 @@ hardcoded-`n_proto` bug, and:
 | `render_mixture_plot(model, h5)` | per-slide | `mixture_{stem}.png` |
 | `render_example_patches(model, h5, wsi, k=4)` | per-slide | dir of `prototype_NN/patch_NN.png` |
 | `render_tsne_per_slide(model, h5, wsi)` | per-slide | `tsne_{stem}.png` |
-| `render_topk_grid(model, feats_dir, wsi_dir, per_proto=3)` | dataset-wide | `topk_grid.png` |
+| `render_topk_grid(model, feats_dir, wsi_dir, per_proto=3)` | dataset-wide | `topk_grid.png` (superseded by `render_prototype_dictionary`; left in place but no longer called by `post_train_viz`) |
+| `render_prototype_dictionary(model, feats_dir, wsi_dir, per_proto=3)` | dataset-wide | per-patch PNGs under `section_d/proto_{c:02d}/patch_{rank:02d}.png` + a `dict` (Section D) |
 | `render_umap(model, feats_dir)` | dataset-wide | `umap.png` |
+
+**`render_prototype_dictionary` (Section D — prototype dictionary).** Selects the
+top `per_proto` patches **per prototype** across the dataset with the *same*
+per-prototype heap + soft-assignment scoring as `render_topk_grid`, but writes
+each patch as its own PNG (instead of one composite grid) so the UI can render a
+column per prototype. Each prototype's color comes from the same
+`get_default_cmap(model.n_proto)` the assignment map and π_c bars use, converted
+to a `#rrggbb` hex string so columns/labels match the heatmap. Returns:
+
+```json
+{ "per_proto": 3,
+  "prototypes": [
+    { "index": 0, "color": "#rrggbb", "patches": ["<abs viz path>", "..."] },
+    "...  one entry for EVERY c in range(n_proto); prototypes with no patches"
+    "     get an empty `patches` list so every column still renders"
+  ] }
+```
+
+Heavy imports (h5py/openslide/PIL) stay lazy. Stored under the `section_d` key of
+`model.viz_artifacts` (see §7).
 
 Cost caps: UMAP samples ≤500 patches/slide, ≤50 000 total; top-K streams every h5 once
 keeping a per-prototype heap.
@@ -335,8 +356,26 @@ The Section A shape:
 } }
 ```
 
+The Section D (prototype dictionary) shape rides alongside under the `section_d` key:
+
+```json
+{ "section_d": {
+    "per_proto": 3,
+    "prototypes": [
+      { "index": 0, "color": "#rrggbb", "patches": ["<abs viz path>", "..."] }
+    ]
+} }
+```
+
+`prototypes` has one entry for **every** `c in range(n_proto)` (prototypes with no
+representative patches carry an empty `patches` list, so the UI always shows a
+column). `color` is the prototype's `get_default_cmap(n_proto)` color as `#rrggbb`,
+matching the assignment map and π_c bars. PNGs live under
+`viz_cache/{model_id}/section_d/proto_{c:02d}/patch_{rank:02d}.png`.
+
 All paths are absolute `viz_cache` paths served by `GET /api/viz/{path}`. Any individual
-render that fails is simply absent from the dict (partial success still publishes).
+render that fails is simply absent from the dict (partial success still publishes). The
+two sections are written with a load-merge-dump so rendering one never clobbers the other.
 
 ### Prototype labels — `routes/labels.py`
 | Method | Path | Purpose |
