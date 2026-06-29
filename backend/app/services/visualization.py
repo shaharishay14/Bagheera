@@ -302,23 +302,32 @@ def _open_wsi(wsi_path: Path):
 
 
 def resolve_wsi_path(slide_id: str, wsi_dir: Path | str) -> Path | None:
-    """Find a WSI file under wsi_dir whose stem matches `slide_id`.
+    """Find a WSI file whose stem matches `slide_id`, under `wsi_dir` or any
+    subdirectory beneath it.
 
-    Returns None if no match — callers use this to skip slides with missing
-    WSIs gracefully (per assumption #6).
+    Returns None if no match — callers skip slides with missing WSIs gracefully
+    (per assumption #6). The recursive fallback supports datasets nested *under*
+    the folder TRIDENT was pointed at: e.g. a run whose `wsi_dir=/data` whose
+    slides actually live in `/data/Test/`. First stem-match (with a recognized
+    extension) wins. `os.walk` over a very large root is the cost of this
+    convenience; in practice `wsi_dir` is dataset-scoped so the subtree is small.
     """
     base = Path(wsi_dir)
     if not base.is_dir():
         return None
-    # Cheap direct hits first.
+    # Cheap direct hits first (slide sitting directly in wsi_dir).
     for ext in WSI_EXTENSIONS:
         candidate = base / f"{slide_id}{ext}"
         if candidate.is_file():
             return candidate
-    # Fallback: scan one level deep for variant naming.
-    for child in base.iterdir():
-        if child.is_file() and child.stem == slide_id and child.suffix.lower() in WSI_EXTENSIONS:
-            return child
+    # Then any file at any depth whose stem matches and extension is recognized.
+    # os.walk visits `base` itself first, so this also covers the flat case.
+    exts = set(WSI_EXTENSIONS)
+    for dirpath, _dirnames, filenames in os.walk(base):
+        for name in filenames:
+            p = Path(name)
+            if p.stem == slide_id and p.suffix.lower() in exts:
+                return Path(dirpath) / name
     return None
 
 
