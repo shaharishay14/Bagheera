@@ -826,6 +826,232 @@ def render_umap(model: Model, dataset_features_dir: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
+# Section C (on-tissue 2D-embedding map) renderer
+# ---------------------------------------------------------------------------
+#
+# Bivariate (2D) colormap: a Stevens-style bilinear choropleth scheme. Each
+# patch's two normalized UMAP coordinates (u, v) drive a bilinear blend of four
+# corner colors, so the painted slide reads as a smooth 2D color field that the
+# adjacent color-square legend decodes:
+#     (u=0, v=0) light grey   → "neither axis high"
+#     (u=1, v=0) muted red    → high UMAP-1 only
+#     (u=0, v=1) muted teal    → high UMAP-2 only
+#     (u=1, v=1) dark violet   → both axes high
+# This keeps low values neutral and pushes each axis toward a distinct,
+# perceptually separable hue, with the diagonal darkening so density is legible.
+
+# Stevens bivariate corner colors (RGB 0-255), indexed [u][v].
+_BIVARIATE_C00 = (232, 232, 232)  # low  UMAP-1, low  UMAP-2  (#e8e8e8)
+_BIVARIATE_C10 = (200, 90, 90)    # high UMAP-1, low  UMAP-2  (#c85a5a)
+_BIVARIATE_C01 = (100, 172, 190)  # low  UMAP-1, high UMAP-2  (#64acbe)
+_BIVARIATE_C11 = (87, 66, 73)     # high UMAP-1, high UMAP-2  (#574249)
+
+SECTION_C_DOWNSAMPLE = SECTION_A_DOWNSAMPLE  # hi-res / zoomable, like Section A
+
+
+def section_c_dir(model: Model) -> Path:
+    """The VIZ_CACHE_ROOT/{model_id}/section_c/ directory (created on demand)."""
+    return _viz_dir(model, subdir="section_c")
+
+
+def _norm01(arr):
+    """Robustly normalize a 1D array to [0, 1] via 2nd/98th percentile clipping.
+
+    Percentile clipping keeps a couple of UMAP outliers from compressing the
+    whole color range into one corner. Degenerate (constant) inputs return all
+    zeros.
+    """
+    import numpy as np  # noqa: WPS433
+
+    a = np.asarray(arr, dtype=float)
+    if a.size == 0:
+        return a
+    lo, hi = np.percentile(a, 2), np.percentile(a, 98)
+    if hi <= lo:
+        lo, hi = float(a.min()), float(a.max())
+    if hi <= lo:
+        return np.zeros_like(a)
+    return np.clip((a - lo) / (hi - lo), 0.0, 1.0)
+
+
+def _bivariate_colors(u, v):
+    """Map normalized (u, v) arrays in [0,1] to RGB (0-255) via bilinear blend.
+
+    Returns an (N, 3) int array. `u` drives the UMAP-1 axis (toward red), `v`
+    the UMAP-2 axis (toward teal); the (1,1) corner darkens to violet.
+    """
+    import numpy as np  # noqa: WPS433
+
+    c00 = np.asarray(_BIVARIATE_C00, dtype=float)
+    c10 = np.asarray(_BIVARIATE_C10, dtype=float)
+    c01 = np.asarray(_BIVARIATE_C01, dtype=float)
+    c11 = np.asarray(_BIVARIATE_C11, dtype=float)
+
+    u = np.clip(np.asarray(u, dtype=float), 0.0, 1.0)[:, None]
+    v = np.clip(np.asarray(v, dtype=float), 0.0, 1.0)[:, None]
+
+    rgb = (
+        (1 - u) * (1 - v) * c00
+        + u * (1 - v) * c10
+        + (1 - u) * v * c01
+        + u * v * c11
+    )
+    return np.clip(np.round(rgb), 0, 255).astype(int)
+
+
+def _bivariate_legend_square(size: int = 128):
+    """A `size`×`size` PIL image of the 2D colormap (UMAP-1 → x, UMAP-2 → y up)."""
+    import numpy as np  # noqa: WPS433
+    from PIL import Image  # noqa: WPS433
+
+    xs = np.linspace(0.0, 1.0, size)
+    ys = np.linspace(0.0, 1.0, size)
+    uu, vv = np.meshgrid(xs, ys)
+    rgb = _bivariate_colors(uu.ravel(), vv.ravel()).reshape(size, size, 3).astype("uint8")
+    # Row 0 is the image top; flip so larger v (UMAP-2) sits higher visually.
+    rgb = rgb[::-1, :, :]
+    return Image.fromarray(rgb, "RGB")
+
+
+def _build_bivariate_legend_panel(square_px: int = 128):
+    """Color square + axis labels ('UMAP-1' x, 'UMAP-2' y) composited on white.
+
+    Returned as a single RGB PIL image to paste into a corner of the on-tissue
+    map so the bivariate colors are interpretable.
+    """
+    from PIL import Image, ImageDraw, ImageFont  # noqa: WPS433
+
+    left_pad = 18   # room for the rotated y-axis label
+    bottom_pad = 16  # room for the x-axis label
+    border = 1
+
+    sq = _bivariate_legend_square(square_px)
+    panel = Image.new("RGB", (left_pad + square_px + 2 * border, square_px + 2 * border + bottom_pad), (255, 255, 255))
+    panel.paste(sq, (left_pad + border, border))
+
+    draw = ImageDraw.Draw(panel)
+    try:
+        font = ImageFont.load_default()
+    except Exception:  # noqa: BLE001
+        font = None
+    # Thin frame around the swatch.
+    draw.rectangle(
+        [left_pad, 0, left_pad + square_px + 2 * border - 1, square_px + 2 * border - 1],
+        outline=(40, 40, 40),
+        width=border,
+    )
+    # X-axis label along the bottom of the swatch.
+    draw.text(
+        (left_pad + square_px // 2, square_px + 2 * border + 1),
+        "UMAP-1 →",
+        fill=(0, 0, 0),
+        font=font,
+        anchor="ma",
+    )
+    # Y-axis label, rotated, along the left edge of the swatch.
+    ylabel = Image.new("RGB", (square_px, 12), (255, 255, 255))
+    yd = ImageDraw.Draw(ylabel)
+    yd.text((square_px // 2, 6), "UMAP-2 →", fill=(0, 0, 0), font=font, anchor="mm")
+    ylabel = ylabel.rotate(90, expand=True)
+    panel.paste(ylabel, (0, border + (square_px - ylabel.height) // 2))
+    return panel
+
+
+def render_umap_on_tissue(
+    model: Model,
+    h5_path: Path,
+    wsi_path: Path,
+    *,
+    downsample_target: int = SECTION_C_DOWNSAMPLE,
+    out_path: Path | None = None,
+) -> Path:
+    """On-tissue 2D-embedding map for ONE slide (Section C of the Analysis page).
+
+    Per-slide companion to the dataset-wide abstract UMAP scatter (`render_umap`).
+    For this slide's patches we fit a **2D UMAP**, normalize the two embedding
+    axes to [0,1], and color each patch via a bivariate (2D) colormap, then paint
+    those colors at each patch's spatial `coords`/`patch_size` location over the
+    downsampled slide — reusing the same `visualize_categorical_heatmap` overlay
+    machinery as the assignment map (same alpha/vis-level conventions, so it's
+    zoomable). A small 2D-colormap legend (color square + 'UMAP-1'/'UMAP-2' axes)
+    is composited into the bottom-right corner so the colors are interpretable.
+
+    Output: viz_cache/{model_id}/section_c/umap_on_tissue_{slide_stem}.png
+
+    `downsample_target` mirrors Section A (smaller = higher resolution).
+    """
+    _ensure_panther_on_syspath()
+    import numpy as np  # noqa: WPS433
+    from PIL import Image  # noqa: WPS433
+
+    from visualization.prototype_visualization_utils import (  # type: ignore[import-not-found]
+        visualize_categorical_heatmap,
+    )
+
+    coords, feats, patch_size = _load_h5(h5_path)
+    feats_np = feats.detach().cpu().numpy()
+    n_patches = feats_np.shape[0]
+    if n_patches == 0:
+        raise VisualizationError("No patches in features file for on-tissue UMAP.")
+
+    # 2D UMAP of THIS slide's patches (heavy import stays lazy).
+    import umap  # type: ignore[import-not-found]  # noqa: WPS433
+
+    # n_neighbors must be < n_samples; clamp for small slides.
+    n_neighbors = max(2, min(15, n_patches - 1))
+    reducer = umap.UMAP(
+        n_components=2, n_neighbors=n_neighbors, min_dist=0.1, random_state=model.seed
+    )
+    emb = reducer.fit_transform(feats_np)
+
+    u = _norm01(emb[:, 0])
+    v = _norm01(emb[:, 1])
+    colors = _bivariate_colors(u, v)  # (n_patches, 3) int
+
+    # Reuse the assignment-map overlay: give every patch its own "label" and a
+    # color dict keyed by that label = its bivariate embedding color.
+    labels = np.arange(n_patches)
+    label2color = {int(i): tuple(int(c) for c in colors[i]) for i in range(n_patches)}
+
+    wsi = _open_wsi(wsi_path)
+    try:
+        try:
+            vis_level = wsi.get_best_level_for_downsample(downsample_target)
+        except Exception:  # noqa: BLE001 — openslide quirks
+            vis_level = wsi.level_count - 1
+
+        img = visualize_categorical_heatmap(
+            wsi,
+            coords,
+            labels,
+            label2color_dict=label2color,
+            vis_level=vis_level,
+            patch_size=(patch_size, patch_size),
+            alpha=0.4,
+            verbose=False,
+        ).convert("RGB")
+    finally:
+        _close_wsi(wsi)
+
+    # Composite the 2D-colormap legend into the bottom-right corner.
+    try:
+        legend = _build_bivariate_legend_panel()
+        margin = max(8, img.width // 80)
+        lx = img.width - legend.width - margin
+        ly = img.height - legend.height - margin
+        if lx >= 0 and ly >= 0:
+            img.paste(legend, (lx, ly))
+    except Exception as exc:  # noqa: BLE001 — a legend hiccup must not drop the map
+        logger.warning("umap_on_tissue: legend composite failed: %s", exc)
+
+    if out_path is None:
+        out_path = section_c_dir(model) / f"umap_on_tissue_{Path(wsi_path).stem}.png"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    img.save(str(out_path), format="PNG", optimize=True)
+    return out_path
+
+
+# ---------------------------------------------------------------------------
 # Section A (per-fold Analysis page) renderers
 # ---------------------------------------------------------------------------
 

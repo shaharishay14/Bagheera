@@ -204,8 +204,28 @@ export interface SectionD {
   }[];
 }
 
+/**
+ * Section C of the per-fold Analysis view — the dataset-wide UMAP pair for one
+ * representative slide:
+ *
+ *   ┌ On-tissue 2D-embedding colormap ─┐ ┌ Abstract UMAP scatter ─┐
+ *   └──────────────────────────────────┘ └────────────────────────┘
+ *
+ * Either image may be absent (partial success) — resolve each via
+ * `resolveVizUrl` and degrade to a placeholder when the path is missing.
+ */
+export interface SectionC {
+  /** Slide the on-tissue colormap is painted on (caption text). */
+  slide_id: string;
+  /** Viz path: dataset-wide abstract UMAP scatter, colored by prototype. */
+  scatter?: string;
+  /** Viz path: per-slide 2D-embedding colormap painted on the slide. */
+  on_tissue?: string;
+}
+
 export interface VizArtifacts {
   section_a?: SectionA;
+  section_c?: SectionC;
   section_d?: SectionD;
 }
 

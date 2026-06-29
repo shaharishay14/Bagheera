@@ -6,6 +6,7 @@ import JobStatusPoller from '../components/JobStatusPoller';
 import NotesThread from '../components/NotesThread';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
 import SectionAPanel from '../components/SectionAPanel';
+import SectionCPanel from '../components/SectionCPanel';
 import SectionDPanel from '../components/SectionDPanel';
 import {
   ApiError,
@@ -374,17 +375,7 @@ function AnalysisDrawer({ model, onJobsRefresh }: { model: ModelInfo; onJobsRefr
 
       <SectionDPanel model={model} />
 
-      <section>
-        <SectionHeader title="Across the dataset" />
-        <img
-          src={resolveVizUrl(
-            model.umap_path,
-            () => vizPlaceholderUrl('umap', { label: 'UMAP', width: 720, height: 320 })
-          )}
-          alt="UMAP"
-          className="mt-2 w-full rounded border border-border bg-surface"
-        />
-      </section>
+      <SectionCPanel model={model} />
 
       <section>
         <SectionHeader title="Viz jobs" />

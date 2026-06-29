@@ -177,7 +177,7 @@ The three real handlers:
 | Handler | File | Does |
 | --- | --- | --- |
 | `panther_train` | `panther_train.py` | For a Model Group, runs K PANTHER subprocesses sequentially (one `PantherRun` row each); sets each Model `ready`/`failed`; enqueues a `post_train_viz` per successful fold. |
-| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the **Section D** prototype dictionary (supersedes the top-K grid — `topk_grid_path` is no longer set), the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`); merges both into `model.viz_artifacts={"section_a":{...},"section_d":{...}}` (load-merge-dump, never clobbering a sibling section) + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
+| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the **Section D** prototype dictionary (supersedes the top-K grid — `topk_grid_path` is no longer set), the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`), and the **Section C** on-tissue 2D-embedding map (`render_umap_on_tissue` for that same slide); merges all into `model.viz_artifacts={"section_a":{...},"section_c":{...},"section_d":{...}}` (load-merge-dump, never clobbering a sibling section) + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
 | `inference` | `inference_job.py` | For one Inference: hash slide → run TRIDENT → locate `.h5` → render heatmap/mixture/example-patches/t-SNE → `ready` if ≥1 render succeeded. |
 
 ---
@@ -248,7 +248,8 @@ hardcoded-`n_proto` bug, and:
 | `render_tsne_per_slide(model, h5, wsi)` | per-slide | `tsne_{stem}.png` |
 | `render_topk_grid(model, feats_dir, wsi_dir, per_proto=3)` | dataset-wide | `topk_grid.png` (superseded by `render_prototype_dictionary`; left in place but no longer called by `post_train_viz`) |
 | `render_prototype_dictionary(model, feats_dir, wsi_dir, per_proto=3)` | dataset-wide | per-patch PNGs under `section_d/proto_{c:02d}/patch_{rank:02d}.png` + a `dict` (Section D) |
-| `render_umap(model, feats_dir)` | dataset-wide | `umap.png` |
+| `render_umap(model, feats_dir)` | dataset-wide | `umap.png` (abstract scatter; sets `model.umap_path`) |
+| `render_umap_on_tissue(model, h5, wsi, *, downsample_target=SECTION_C_DOWNSAMPLE=24, out_path=None)` | per-slide | `section_c/umap_on_tissue_{stem}.png` (Section C — on-tissue 2D-embedding map) |
 
 **`render_prototype_dictionary` (Section D — prototype dictionary).** Selects the
 top `per_proto` patches **per prototype** across the dataset with the *same*
@@ -272,6 +273,20 @@ Heavy imports (h5py/openslide/PIL) stay lazy. Stored under the `section_d` key o
 
 Cost caps: UMAP samples ≤500 patches/slide, ≤50 000 total; top-K streams every h5 once
 keeping a per-prototype heap.
+
+**`render_umap_on_tissue` (Section C — on-tissue 2D-embedding map).** The per-slide
+companion to the abstract scatter `render_umap` produces. For one slide it fits a
+**2D UMAP** of that slide's patch features (lazy `import umap`), robustly normalizes the
+two embedding axes to [0,1] (2nd/98th-percentile clip), and colors each patch via a
+**bivariate (2D) colormap** — a Stevens-style bilinear choropleth: `u` (UMAP-1) drives a
+muted red, `v` (UMAP-2) a muted teal, the (1,1) corner darkens to violet, low/low is light
+grey. Those per-patch colors are painted at each patch's `coords`/`patch_size` location over
+the downsampled slide by **reusing the assignment-map overlay** (`visualize_categorical_heatmap`
+with one unique label per patch + a per-label color dict; same `alpha=0.4` / `vis_level`
+conventions, so it's zoomable). A small 2D-colormap legend (color square with `UMAP-1`/`UMAP-2`
+axes) is composited into the bottom-right corner so the colors are interpretable. Output lands
+under `viz_cache/{model_id}/section_c/`. Heavy imports (umap/h5py/openslide/PIL) stay lazy.
+Stored under the `section_c` key of `model.viz_artifacts` (see §7).
 
 **Section A (Analysis page per-slide panel).** Mirrors the PANTHER paper figure; all
 artifacts land under `viz_cache/{model_id}/section_a/`.
@@ -366,6 +381,23 @@ The Section D (prototype dictionary) shape rides alongside under the `section_d`
     ]
 } }
 ```
+
+The Section C (on-tissue 2D-embedding map) shape rides alongside under the `section_c` key:
+
+```json
+{ "section_c": {
+    "slide_id": "<same deterministic slide as section_a>",
+    "scatter": "<model.umap_path — abstract UMAP scatter, may be null if it failed>",
+    "on_tissue": "<abs viz path — section_c/umap_on_tissue_{stem}.png>"
+} }
+```
+
+`slide_id` is the same deterministic slide Section A uses (`pick_preview_slides(count=1)`),
+so the abstract scatter and the on-tissue map describe the same example. `scatter` points
+at the abstract UMAP this handler renders (`model.umap_path`); if that render failed it is
+`null` but `section_c` is still emitted with `on_tissue`. All three sections (`section_a`,
+`section_c`, `section_d`) are written with a load-merge-dump so rendering one never clobbers
+the others.
 
 `prototypes` has one entry for **every** `c in range(n_proto)` (prototypes with no
 representative patches carry an empty `patches` list, so the UI always shows a

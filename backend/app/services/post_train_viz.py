@@ -10,7 +10,10 @@ Runs after a fold model finishes training. For one Model row:
   4. Render the dataset-wide UMAP → Model.umap_path.
   5. Render the Section A per-slide panel → merged into Model.viz_artifacts
      under the `section_a` key.
-  6. Flip Model.viz_status to 'ready' (or 'failed' if every render blew up).
+  6. Render the Section C on-tissue 2D-embedding map for the SAME deterministic
+     Section-A slide → merged into Model.viz_artifacts under the `section_c` key
+     ({"slide_id", "scatter": model.umap_path, "on_tissue": <new path>}).
+  7. Flip Model.viz_status to 'ready' (or 'failed' if every render blew up).
 
 Per-step failures are caught and logged into the job log; the handler keeps
 going so a partial render still publishes whatever succeeded. If at least
@@ -140,6 +143,20 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
         failures.append(f"section_a: {exc}")
         log.write(f"  FAILED section_a: {exc}\n{traceback.format_exc()}")
 
+    # --- Section C (on-tissue 2D-embedding map) -----------------------------
+    # Companion to the abstract UMAP scatter: paints each patch by its 2D UMAP
+    # coordinate (bivariate colormap) at its slide location, for the SAME
+    # deterministic Section-A slide. `scatter` reuses the umap_path rendered
+    # above (may be None if that step failed — we still emit on_tissue).
+    section_c: dict | None = None
+    try:
+        section_c = _render_section_c(model, db, wsi_dir, umap_path, log)
+        if section_c:
+            successes += 1
+    except Exception as exc:  # noqa: BLE001 — never let Section C abort the rest
+        failures.append(f"section_c: {exc}")
+        log.write(f"  FAILED section_c: {exc}\n{traceback.format_exc()}")
+
     # --- Commit results -----------------------------------------------------
     model.preview_heatmap_paths = json.dumps(heatmap_paths) if heatmap_paths else None
     model.umap_path = umap_path
@@ -158,6 +175,8 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
         artifacts["section_a"] = section_a
     if section_d:
         artifacts["section_d"] = section_d
+    if section_c:
+        artifacts["section_c"] = section_c
     model.viz_artifacts = json.dumps(artifacts) if artifacts else None
 
     model.viz_status = "ready" if successes > 0 else "failed"
@@ -263,6 +282,46 @@ def _render_section_a(model: Model, db: Session, wsi_dir, log: JobLog) -> dict |
         log.write(f"    WARNING: failed to write Section A repick cache: {exc}")
 
     return section
+
+
+def _render_section_c(model: Model, db: Session, wsi_dir, umap_path, log: JobLog) -> dict | None:
+    """Render the Section C on-tissue 2D-embedding map for ONE deterministic slide.
+
+    Uses the SAME slide as Section A (`pick_preview_slides(count=1)`) so the
+    on-tissue map and the abstract scatter describe the same example. Returns the
+    `section_c` dict to merge under model.viz_artifacts, or None if no usable
+    slide could be resolved (missing WSI / h5 / WSI dir).
+
+    `scatter` points at the abstract UMAP this handler renders (`model.umap_path`,
+    passed in as `umap_path`); it may legitimately be None if that render failed,
+    in which case we still emit `section_c` with the on-tissue map alone.
+    """
+    from pathlib import Path
+
+    if wsi_dir is None:
+        log.write("  section_c: no WSI dir resolved — skipping.")
+        return None
+
+    ids = pick_preview_slides(model, count=1)
+    if not ids:
+        log.write("  section_c: no slide could be picked (train.csv missing/empty).")
+        return None
+    slide_id = ids[0]
+
+    h5_path = Path(model.features_dir) / f"{slide_id}.h5"
+    wsi_path = visualization.resolve_wsi_path(slide_id, wsi_dir)
+    if not h5_path.is_file():
+        log.write(f"  section_c: h5 not found for {slide_id} at {h5_path} — skipping.")
+        return None
+    if wsi_path is None:
+        log.write(f"  section_c: no WSI file with stem {slide_id} under {wsi_dir} — skipping.")
+        return None
+
+    log.write(f"  section_c: rendering on-tissue UMAP for slide {slide_id}")
+    out = visualization.render_umap_on_tissue(model, h5_path, wsi_path)
+    log.write(f"    on_tissue: {out}")
+
+    return {"slide_id": slide_id, "scatter": umap_path, "on_tissue": str(out)}
 
 
 def _resolve_preview_slide_ids(model: Model) -> list[str]:
