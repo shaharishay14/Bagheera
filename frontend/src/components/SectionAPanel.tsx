@@ -107,7 +107,12 @@ export default function SectionAPanel({ model }: { model: ModelInfo }) {
           <div className="flex items-baseline gap-2">
             <h5 className="text-xs font-semibold text-ink">ROIs with Prototype Distribution</h5>
             {section?.roi_index != null ? (
-              <span className="font-mono text-[10px] text-ink-faint">#{section.roi_index}</span>
+              <span className="font-mono text-[10px] text-ink-faint">window #{section.roi_index}</span>
+            ) : null}
+            {section?.slide_id ? (
+              <span className="font-mono text-[10px] text-ink-faint">
+                · from <span className="text-ink-muted">{section.slide_id}</span>
+              </span>
             ) : null}
           </div>
           <button

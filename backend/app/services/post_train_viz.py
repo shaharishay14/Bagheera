@@ -251,7 +251,9 @@ def _render_section_a(model: Model, db: Session, wsi_dir, log: JobLog) -> dict |
     section: dict = {"slide_id": slide_id, "roi_index": 0}
 
     try:
-        out = visualization.render_wsi_thumbnail(model, wsi_path)
+        out = visualization.render_wsi_thumbnail(
+            model, wsi_path, coords=coords, patch_size=patch_size
+        )
         section["thumbnail"] = str(out)
         log.write(f"    thumbnail: {out}")
     except Exception as exc:  # noqa: BLE001
@@ -265,6 +267,7 @@ def _render_section_a(model: Model, db: Session, wsi_dir, log: JobLog) -> dict |
             patch_size,
             wsi_path,
             downsample_target=visualization.SECTION_A_DOWNSAMPLE,
+            crop_to_tissue=True,
             out_path=visualization.section_a_dir(model) / f"assignment_map_{slide_id}.png",
         )
         section["assignment_map"] = str(out)

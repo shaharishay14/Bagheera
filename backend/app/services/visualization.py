@@ -424,6 +424,7 @@ def render_assignment_heatmap_from_assignments(
     wsi_path: Path,
     *,
     downsample_target: int = 128,
+    crop_to_tissue: bool = False,
     out_path: Path | None = None,
 ) -> Path:
     """Paint a categorical assignment heatmap from already-computed assignments.
@@ -431,6 +432,10 @@ def render_assignment_heatmap_from_assignments(
     Split out of `render_assignment_heatmap` so Section A can reuse the
     `(coords, cluster_labels)` it already computed for the thumbnail / π_c /
     ROI renders instead of re-running the encoder.
+
+    When `crop_to_tissue` is set the overlay is cropped to the tissue bounding
+    box of `coords` (same math as the thumbnail crop) so it frames the tissue
+    and stays aligned with the cropped thumbnail in the Section A panel.
     """
     _ensure_panther_on_syspath()
     from visualization.prototype_visualization_utils import (  # type: ignore[import-not-found]
@@ -457,6 +462,11 @@ def render_assignment_heatmap_from_assignments(
         alpha=0.4,
         verbose=False,
     )
+
+    if crop_to_tissue:
+        w0, h0 = wsi.dimensions
+        bbox = _tissue_bbox_level0(coords, patch_size, w0, h0)
+        img = _crop_full_extent(img, w0, h0, bbox)
 
     if out_path is None:
         out_path = _viz_dir(model) / f"heatmap_{Path(wsi_path).stem}.png"
@@ -1066,6 +1076,9 @@ def render_umap_on_tissue(
             alpha=0.4,
             verbose=False,
         ).convert("RGB")
+        # Frame the tissue (same crop as Section A) before the legend goes on.
+        w0, h0 = wsi.dimensions
+        img = _crop_full_extent(img, w0, h0, _tissue_bbox_level0(coords, patch_size, w0, h0))
     finally:
         _close_wsi(wsi)
 
@@ -1097,7 +1110,13 @@ def section_a_dir(model: Model) -> Path:
     return _viz_dir(model, subdir="section_a")
 
 
-def render_wsi_thumbnail(model: Model, wsi_path: Path) -> Path:
+def render_wsi_thumbnail(
+    model: Model,
+    wsi_path: Path,
+    *,
+    coords=None,
+    patch_size: int | None = None,
+) -> Path:
     """Downscaled H&E thumbnail of the whole slide, with a physical scale bar.
 
     Per-slide. Output: viz_cache/{model_id}/section_a/thumbnail_{slide_stem}.png
@@ -1105,6 +1124,11 @@ def render_wsi_thumbnail(model: Model, wsi_path: Path) -> Path:
     Microns-per-pixel is read from openslide's MPP_X property. If it's missing
     the thumbnail is still rendered, just without the scale bar (we never fail
     on a missing MPP).
+
+    When `coords` (+ `patch_size`) are supplied, the thumbnail is cropped to the
+    tissue bounding box of those patches (with a small margin) so the default,
+    un-zoomed view frames the tissue instead of a mostly-empty slide. The crop
+    matches the assignment-map crop (same bbox math) so the two line up in the UI.
     """
     from PIL import Image  # noqa: WPS433,F401 — Resampling enum lives on Image
 
@@ -1119,9 +1143,14 @@ def render_wsi_thumbnail(model: Model, wsi_path: Path) -> Path:
             tw, th = w0, h0
         thumb = wsi.get_thumbnail((tw, th)).convert("RGB")
         mpp = _wsi_mpp(wsi)
-        if mpp:
-            # Each thumbnail pixel spans this many microns.
-            _draw_scale_bar(thumb, mpp * (w0 / thumb.width))
+        # Per-pixel micron span of the full-extent thumbnail — capture BEFORE any
+        # crop changes thumb.width (cropping preserves the per-pixel scale).
+        um_per_pixel = mpp * (w0 / thumb.width) if mpp else None
+        if coords is not None and patch_size:
+            bbox = _tissue_bbox_level0(coords, patch_size, w0, h0)
+            thumb = _crop_full_extent(thumb, w0, h0, bbox)
+        if um_per_pixel:
+            _draw_scale_bar(thumb, um_per_pixel)
     finally:
         _close_wsi(wsi)
 
@@ -1262,30 +1291,23 @@ def render_roi_from_assignments(
         raw_path = out_dir / f"roi_raw_{stem}_{idx}.png"
         raw_disp.save(str(raw_path), format="PNG", optimize=True)
 
-        # (b) The same region tiled as a grid of its patches, each tinted by
-        #     its prototype color (same cmap as the assignment map).
-        grid_img = Image.new(
-            "RGB", (ROI_GRID * ROI_CELL_PX, ROI_GRID * ROI_CELL_PX), color=(255, 255, 255)
-        )
+        # (b) The same region with each ON-TISSUE patch tinted by its prototype
+        #     color (same cmap as the assignment map). The raw ROI crop is the
+        #     base layer, so cells where TRIDENT extracted no patch (background /
+        #     fat / glass) still show real tissue context instead of a white gap.
+        side = ROI_GRID * ROI_CELL_PX
+        grid_img = raw.resize((side, side), Image.Resampling.BILINEAR).convert("RGB")
         for i in member_idxs:
             cx, cy = int(coords[i][0]), int(coords[i][1])
             col = (cx - x0) // cell
             row = (cy - y0) // cell
             if not (0 <= col < ROI_GRID and 0 <= row < ROI_GRID):
                 continue
-            try:
-                patch = (
-                    wsi.read_region((cx, cy), 0, (cell, cell))
-                    .convert("RGB")
-                    .resize((ROI_CELL_PX, ROI_CELL_PX), Image.Resampling.BILINEAR)
-                )
-            except Exception as exc:  # noqa: BLE001 — one bad patch shouldn't kill the grid
-                logger.warning("roi: read_region failed for patch %s: %s", i, exc)
-                continue
+            box = (col * ROI_CELL_PX, row * ROI_CELL_PX, (col + 1) * ROI_CELL_PX, (row + 1) * ROI_CELL_PX)
             color = tuple(int(c) for c in cmap[int(labels[i])][:3])
             tint = Image.new("RGB", (ROI_CELL_PX, ROI_CELL_PX), color=color)
-            blended = Image.blend(patch, tint, ROI_TINT_ALPHA)
-            grid_img.paste(blended, (col * ROI_CELL_PX, row * ROI_CELL_PX))
+            blended = Image.blend(grid_img.crop(box), tint, ROI_TINT_ALPHA)
+            grid_img.paste(blended, box)
         colored_path = out_dir / f"roi_colored_{stem}_{idx}.png"
         grid_img.save(str(colored_path), format="PNG", optimize=True)
     finally:
@@ -1423,6 +1445,56 @@ def _fit_max(img, max_px: int):
         (max(1, round(img.width * scale)), max(1, round(img.height * scale))),
         Image.Resampling.BILINEAR,
     )
+
+
+# Fraction of the tissue bbox added as breathing room on each side when cropping
+# a whole-slide render down to the tissue. Small enough to fill the frame with
+# tissue, large enough that edge patches aren't flush against the border.
+TISSUE_CROP_MARGIN = 0.04
+
+
+def _tissue_bbox_level0(coords, patch_size: int, w0: int, h0: int, margin: float = TISSUE_CROP_MARGIN):
+    """Level-0 bounding box (x0, y0, x1, y1) of the extracted patches + margin.
+
+    Computed purely from the patch `coords` (top-left corners) and `patch_size`,
+    so it matches wherever TRIDENT found tissue. Clamped to the slide dimensions.
+    Falls back to the full slide when there are no coords.
+    """
+    import numpy as np  # noqa: WPS433
+
+    c = np.asarray(coords)
+    if c.shape[0] == 0:
+        return 0, 0, int(w0), int(h0)
+    x0 = int(c[:, 0].min())
+    y0 = int(c[:, 1].min())
+    x1 = int(c[:, 0].max()) + int(patch_size)
+    y1 = int(c[:, 1].max()) + int(patch_size)
+    mx = int((x1 - x0) * margin)
+    my = int((y1 - y0) * margin)
+    x0 = max(0, x0 - mx)
+    y0 = max(0, y0 - my)
+    x1 = min(int(w0), x1 + mx)
+    y1 = min(int(h0), y1 + my)
+    return x0, y0, x1, y1
+
+
+def _crop_full_extent(img, w0: int, h0: int, bbox_l0):
+    """Crop a full-slide-extent PIL image to a level-0 bbox.
+
+    `img` is a render whose pixel grid spans the entire level-0 plane (a
+    thumbnail or a `visualize_categorical_heatmap` overlay), so its width maps to
+    `w0`. We scale the level-0 bbox into the image's own pixel space and crop.
+    """
+    sx = img.width / float(w0)
+    sy = img.height / float(h0)
+    x0, y0, x1, y1 = bbox_l0
+    box = (
+        int(x0 * sx),
+        int(y0 * sy),
+        max(int(x0 * sx) + 1, int(x1 * sx)),
+        max(int(y0 * sy) + 1, int(y1 * sy)),
+    )
+    return img.crop(box)
 
 
 def _nice_scale_length(target_um: float) -> float:
