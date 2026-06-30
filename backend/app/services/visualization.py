@@ -135,6 +135,7 @@ ROI_GRID = 16                # ROI is a ROI_GRID x ROI_GRID tile of patches (pap
 ROI_CELL_PX = 80             # rendered cell side in the colored ROI grid
 ROI_RAW_MAX_PX = 768         # longest side of the raw ROI crop
 ROI_TINT_ALPHA = 0.5         # blend weight of the prototype color over the patch
+ROI_BORDER_PX = 1            # black gridline width around each ROI cell (paper style)
 
 
 # ---------------------------------------------------------------------------
@@ -1277,7 +1278,7 @@ def render_roi_from_assignments(
     """
     _ensure_panther_on_syspath()
     import numpy as np  # noqa: WPS433
-    from PIL import Image  # noqa: WPS433
+    from PIL import Image, ImageDraw  # noqa: WPS433
 
     from visualization.prototype_visualization_utils import get_default_cmap  # type: ignore[import-not-found]
 
@@ -1328,6 +1329,15 @@ def render_roi_from_assignments(
             tint = Image.new("RGB", (ROI_CELL_PX, ROI_CELL_PX), color=color)
             blended = Image.blend(grid_img.crop(box), tint, ROI_TINT_ALPHA)
             grid_img.paste(blended, box)
+
+        # Black gridlines around every cell (paper style). Drawn last so the
+        # borders sit on top of both tinted and tissue-base cells.
+        draw = ImageDraw.Draw(grid_img)
+        for k in range(ROI_GRID + 1):
+            p = min(k * ROI_CELL_PX, side - 1)
+            draw.line([(p, 0), (p, side)], fill=(0, 0, 0), width=ROI_BORDER_PX)
+            draw.line([(0, p), (side, p)], fill=(0, 0, 0), width=ROI_BORDER_PX)
+
         colored_path = out_dir / f"roi_colored_{stem}_{idx}.png"
         grid_img.save(str(colored_path), format="PNG", optimize=True)
     finally:
