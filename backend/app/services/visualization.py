@@ -1204,10 +1204,19 @@ def _select_roi_windows(coords, cluster_labels, patch_size: int, grid: int = ROI
 
     Tiles the level-0 plane into `span = grid * patch_size` squares aligned to
     the absolute coordinate origin, groups each patch into its tile, and ranks
-    the occupied tiles by (prototype diversity, then patch density). The
-    non-overlapping tiling guarantees that consecutive `roi_index` values pick
-    visibly different ROIs (no near-duplicate windows), and the ranking is
-    fully determined by the cached `(coords, cluster_labels)` — so repick is
+    the occupied tiles by **occupancy first** (how many of the grid² cells hold
+    an extracted patch), then prototype diversity, then density.
+
+    Occupancy-first is what makes the colored tiling read like the PANTHER paper
+    figure: the top window is one sampled from the *middle of dense tissue* where
+    nearly every cell is on-tissue, so the grid fills with color instead of
+    showing background gaps. (A diversity-first rank could otherwise land on a
+    tissue-boundary window that's half background.) Among equally-full windows we
+    still prefer the most prototype-diverse one, so the tiling stays multi-color.
+
+    The non-overlapping tiling guarantees that consecutive `roi_index` values pick
+    visibly different ROIs (no near-duplicate windows), and the ranking is fully
+    determined by the cached `(coords, cluster_labels)` — so repick is
     reproducible.
 
     Returns a best-first list of `(x0, y0, w, h, member_indices)`.
@@ -1231,12 +1240,20 @@ def _select_roi_windows(coords, cluster_labels, patch_size: int, grid: int = ROI
 
     ranked = []
     for (kx, ky), idxs in members.items():
+        x0, y0 = kx * span, ky * span
+        # Distinct (col, row) cells filled within this window — its "fullness".
+        occupied = {
+            ((int(coords[i][0]) - x0) // cell, (int(coords[i][1]) - y0) // cell)
+            for i in idxs
+        }
+        occupancy = len(occupied)
         distinct = len({int(labels[i]) for i in idxs})
-        ranked.append((distinct, len(idxs), kx * span, ky * span, idxs))
+        ranked.append((occupancy, distinct, len(idxs), x0, y0, idxs))
 
-    # Diversity first, then density; deterministic spatial tiebreak.
-    ranked.sort(key=lambda w: (-w[0], -w[1], w[2], w[3]))
-    return [(int(x0), int(y0), span, span, idxs) for (_d, _c, x0, y0, idxs) in ranked]
+    # Fullness first (paper-style packed tile), then diversity, then density;
+    # deterministic spatial tiebreak keeps repick reproducible.
+    ranked.sort(key=lambda w: (-w[0], -w[1], -w[2], w[3], w[4]))
+    return [(int(x0), int(y0), span, span, idxs) for (_o, _d, _c, x0, y0, idxs) in ranked]
 
 
 def render_roi_from_assignments(
