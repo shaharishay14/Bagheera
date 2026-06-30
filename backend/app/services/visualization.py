@@ -1229,7 +1229,9 @@ def _select_roi_windows(coords, cluster_labels, patch_size: int, grid: int = ROI
     if coords.shape[0] == 0:
         return []
 
-    cell = int(patch_size)
+    # Tile on the TRUE level-0 patch pitch, not the stored patch_size — otherwise
+    # a sub-base-mag extraction lands patches on only every Nth cell (gaps).
+    cell = _coord_pitch(coords, patch_size)
     span = grid * cell
     tx = (coords[:, 0] // span).astype(np.int64)
     ty = (coords[:, 1] // span).astype(np.int64)
@@ -1290,7 +1292,8 @@ def render_roi_from_assignments(
     coords = np.asarray(coords)
     labels = np.asarray(cluster_labels)
     cmap = get_default_cmap(model.n_proto)
-    cell = int(patch_size)
+    # Same true pitch the windows were tiled on, so every cell maps to a patch.
+    cell = _coord_pitch(coords, patch_size)
     stem = Path(wsi_path).stem
     out_dir = section_a_dir(model)
 
@@ -1468,24 +1471,68 @@ def _fit_max(img, max_px: int):
 # a whole-slide render down to the tissue. Small enough to fill the frame with
 # tissue, large enough that edge patches aren't flush against the border.
 TISSUE_CROP_MARGIN = 0.04
+# Percentile clip for the tissue bbox — trims a few stray outlier patches (pen
+# marks, dust, detached control tissue) so the crop frames the main tissue mass
+# instead of being stretched across the whole slide by one speck in a corner.
+TISSUE_BBOX_PCTILE = 1.0
+
+
+def _coord_pitch(coords, fallback: int) -> int:
+    """The level-0 grid pitch of the extracted patches, derived from the coords.
+
+    TRIDENT stores patch top-left corners at level-0 pixels, but the stored
+    `patch_size` attr is the patch side at the *extraction* magnification — which
+    can be half (or a quarter) of the level-0 pitch when patches are extracted
+    below the slide's base magnification. Tiling on the stored `patch_size`
+    therefore lands a colored cell on only every Nth patch, leaving gaps.
+
+    The *most common* positive step between adjacent unique x/y coordinates is
+    the true pitch (one patch to its neighbor), regardless of magnification — so
+    we use that for tiling and read_region. The mode (rather than the min) is
+    robust to a few off-grid artifact patches, which would otherwise inject tiny
+    spurious steps and underestimate the pitch. Falls back to `patch_size` when
+    there aren't enough coords to measure a step.
+    """
+    import numpy as np  # noqa: WPS433
+
+    c = np.asarray(coords)
+    if c.shape[0] < 2:
+        return int(fallback)
+    steps = []
+    for axis in (0, 1):
+        u = np.unique(c[:, axis].astype(np.int64))
+        if u.size > 1:
+            d = np.diff(u)
+            steps.append(d[d > 0])
+    if not steps:
+        return int(fallback)
+    allsteps = np.concatenate(steps)
+    if allsteps.size == 0:
+        return int(fallback)
+    vals, counts = np.unique(allsteps, return_counts=True)
+    return int(vals[int(np.argmax(counts))])
 
 
 def _tissue_bbox_level0(coords, patch_size: int, w0: int, h0: int, margin: float = TISSUE_CROP_MARGIN):
-    """Level-0 bounding box (x0, y0, x1, y1) of the extracted patches + margin.
+    """Robust level-0 bounding box (x0, y0, x1, y1) of the main tissue mass.
 
-    Computed purely from the patch `coords` (top-left corners) and `patch_size`,
-    so it matches wherever TRIDENT found tissue. Clamped to the slide dimensions.
-    Falls back to the full slide when there are no coords.
+    Uses a percentile clip (TISSUE_BBOX_PCTILE / 100 - that) rather than raw
+    min/max so a handful of stray artifact patches in the slide corners don't
+    stretch the box across mostly-empty glass. The high edge is extended by one
+    patch pitch so the last row/column of patches is fully inside. Clamped to the
+    slide dimensions; falls back to the full slide when there are no coords.
     """
     import numpy as np  # noqa: WPS433
 
     c = np.asarray(coords)
     if c.shape[0] == 0:
         return 0, 0, int(w0), int(h0)
-    x0 = int(c[:, 0].min())
-    y0 = int(c[:, 1].min())
-    x1 = int(c[:, 0].max()) + int(patch_size)
-    y1 = int(c[:, 1].max()) + int(patch_size)
+    pitch = _coord_pitch(coords, patch_size)
+    lo, hi = TISSUE_BBOX_PCTILE, 100.0 - TISSUE_BBOX_PCTILE
+    x0 = int(np.percentile(c[:, 0], lo))
+    y0 = int(np.percentile(c[:, 1], lo))
+    x1 = int(np.percentile(c[:, 0], hi)) + pitch
+    y1 = int(np.percentile(c[:, 1], hi)) + pitch
     mx = int((x1 - x0) * margin)
     my = int((y1 - y0) * margin)
     x0 = max(0, x0 - mx)
