@@ -131,7 +131,7 @@ TOPK_DEFAULT_THUMB_PX = 96  # side length of each cropped patch in the grid
 # Section A (Analysis page) tuning.
 THUMB_MAX_PX = 2048          # longest side of the whole-slide thumbnail
 SECTION_A_DOWNSAMPLE = 24    # hi-res assignment-map downsample target (zoomable)
-ROI_GRID = 7                 # ROI is a ROI_GRID x ROI_GRID tile of patches
+ROI_GRID = 16                # ROI is a ROI_GRID x ROI_GRID tile of patches (paper uses 16)
 ROI_CELL_PX = 80             # rendered cell side in the colored ROI grid
 ROI_RAW_MAX_PX = 768         # longest side of the raw ROI crop
 ROI_TINT_ALPHA = 0.5         # blend weight of the prototype color over the patch
