@@ -135,7 +135,8 @@ ROI_GRID = 16                # ROI is a ROI_GRID x ROI_GRID tile of patches (pap
 ROI_CELL_PX = 80             # rendered cell side in the colored ROI grid
 ROI_RAW_MAX_PX = 768         # longest side of the raw ROI crop
 ROI_TINT_ALPHA = 0.5         # blend weight of the prototype color over the patch
-ROI_BORDER_PX = 1            # black gridline width around each ROI cell (paper style)
+ROI_BORDER_PX = 2            # black gridline width around each ROI cell (paper style)
+ASSIGNMENT_BORDER_PX = 2     # black border width around each patch in the assignment map
 
 
 # ---------------------------------------------------------------------------
@@ -426,6 +427,7 @@ def render_assignment_heatmap_from_assignments(
     *,
     downsample_target: int = 128,
     crop_to_tissue: bool = False,
+    patch_borders: bool = False,
     out_path: Path | None = None,
 ) -> Path:
     """Paint a categorical assignment heatmap from already-computed assignments.
@@ -434,9 +436,16 @@ def render_assignment_heatmap_from_assignments(
     `(coords, cluster_labels)` it already computed for the thumbnail / π_c /
     ROI renders instead of re-running the encoder.
 
+    Patches are painted on the TRUE level-0 pitch (derived from the coords), so
+    the colored squares tile contiguously instead of leaving checkerboard gaps
+    when patches are extracted below the slide's base magnification.
+
     When `crop_to_tissue` is set the overlay is cropped to the tissue bounding
     box of `coords` (same math as the thumbnail crop) so it frames the tissue
     and stays aligned with the cropped thumbnail in the Section A panel.
+
+    When `patch_borders` is set each patch gets a black border (paper style),
+    drawn before the crop so the mesh lines up with the painted squares.
     """
     _ensure_panther_on_syspath()
     from visualization.prototype_visualization_utils import (  # type: ignore[import-not-found]
@@ -446,6 +455,7 @@ def render_assignment_heatmap_from_assignments(
 
     wsi = _open_wsi(wsi_path)
     cmap = get_default_cmap(model.n_proto)
+    pitch = _coord_pitch(coords, patch_size)
     # Match the notebook's choice; fall back to the deepest level if the slide
     # is too small to satisfy the requested downsample.
     try:
@@ -459,13 +469,15 @@ def render_assignment_heatmap_from_assignments(
         cluster_labels,
         label2color_dict=cmap,
         vis_level=vis_level,
-        patch_size=(patch_size, patch_size),
+        patch_size=(pitch, pitch),
         alpha=0.4,
         verbose=False,
     )
 
+    w0, h0 = wsi.dimensions
+    if patch_borders:
+        _draw_patch_borders(img, coords, pitch, w0, h0, ASSIGNMENT_BORDER_PX)
     if crop_to_tissue:
-        w0, h0 = wsi.dimensions
         bbox = _tissue_bbox_level0(coords, patch_size, w0, h0)
         img = _crop_full_extent(img, w0, h0, bbox)
 
@@ -1055,6 +1067,10 @@ def render_umap_on_tissue(
     v = _norm01(emb[:, 1])
     colors = _bivariate_colors(u, v)  # (n_patches, 3) int
 
+    # Paint on the true level-0 pitch so the colored field tiles contiguously
+    # (same fix as the assignment map) instead of leaving checkerboard gaps.
+    pitch = _coord_pitch(coords, patch_size)
+
     # Reuse the assignment-map overlay: give every patch its own "label" and a
     # color dict keyed by that label = its bivariate embedding color.
     labels = np.arange(n_patches)
@@ -1073,7 +1089,7 @@ def render_umap_on_tissue(
             labels,
             label2color_dict=label2color,
             vis_level=vis_level,
-            patch_size=(patch_size, patch_size),
+            patch_size=(pitch, pitch),
             alpha=0.4,
             verbose=False,
         ).convert("RGB")
@@ -1550,6 +1566,30 @@ def _tissue_bbox_level0(coords, patch_size: int, w0: int, h0: int, margin: float
     x1 = min(int(w0), x1 + mx)
     y1 = min(int(h0), y1 + my)
     return x0, y0, x1, y1
+
+
+def _draw_patch_borders(img, coords, pitch: int, w0: int, h0: int, width: int) -> None:
+    """Draw a black border around each extracted patch on a full-extent render.
+
+    `img` spans the entire level-0 plane (its width maps to `w0`), so each patch
+    at level-0 corner `(cx, cy)` covers a `pitch`-sided square scaled into the
+    image. Only patches with coords are outlined, so the borders trace the actual
+    on-tissue patch grid — the same paper-style mesh the ROI tiling uses.
+    """
+    import numpy as np  # noqa: WPS433
+    from PIL import ImageDraw  # noqa: WPS433
+
+    c = np.asarray(coords)
+    if c.shape[0] == 0:
+        return
+    draw = ImageDraw.Draw(img)
+    sx = img.width / float(w0)
+    sy = img.height / float(h0)
+    s = max(1, int(round(pitch * sx)))
+    for cx, cy in c[:, :2]:
+        px = int(int(cx) * sx)
+        py = int(int(cy) * sy)
+        draw.rectangle([px, py, px + s, py + s], outline=(0, 0, 0), width=width)
 
 
 def _crop_full_extent(img, w0: int, h0: int, bbox_l0):

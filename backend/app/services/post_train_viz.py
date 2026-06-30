@@ -268,6 +268,7 @@ def _render_section_a(model: Model, db: Session, wsi_dir, log: JobLog) -> dict |
             wsi_path,
             downsample_target=visualization.SECTION_A_DOWNSAMPLE,
             crop_to_tissue=True,
+            patch_borders=True,
             out_path=visualization.section_a_dir(model) / f"assignment_map_{slide_id}.png",
         )
         section["assignment_map"] = str(out)
