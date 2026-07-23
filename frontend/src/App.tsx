@@ -15,7 +15,9 @@ import LandingPage from './pages/LandingPage';
 import StartPage from './pages/StartPage';
 import TridentTrainingPage from './pages/TridentTrainingPage';
 import PantherTrainingPage from './pages/PantherTrainingPage';
+import PantherComparePage from './pages/PantherComparePage';
 import ModelsBrowserPage from './pages/ModelsBrowserPage';
+import ModelDetailPage from './pages/ModelDetailPage';
 import GroupDetailPage from './pages/GroupDetailPage';
 import InferencePage from './pages/InferencePage';
 import QueuePage from './pages/QueuePage';
@@ -33,7 +35,9 @@ const LANDING_SECTIONS = [
 /** Functional ("app mode") nav links shown after the user clicks Let's Start. */
 const APP_LINKS = [
   { to: '/training/trident', label: 'TRIDENT' },
-  { to: '/training/panther', label: 'PANTHER' },
+  // `end` so PANTHER doesn't also light up on the nested /compare route.
+  { to: '/training/panther', label: 'PANTHER', end: true },
+  { to: '/training/panther/compare', label: 'Compare' },
   { to: '/models', label: 'Models' },
   { to: '/queue', label: 'Queue' },
 ];
@@ -52,10 +56,16 @@ export default function App() {
           <Route element={<AppShell />}>
             <Route path="/training" element={<Navigate to="/training/trident" replace />} />
             <Route path="/training/trident" element={<TridentTrainingPage />} />
+            <Route path="/training/panther/compare" element={<PantherComparePage />} />
             <Route path="/training/panther" element={<PantherTrainingPage />} />
             <Route path="/models" element={<ModelsBrowserPage />} />
-            <Route path="/models/:groupId" element={<GroupDetailPage />} />
+            {/* Legacy K-fold groups live under an explicit /group/ segment so the
+                standalone single-model route (/models/:modelId) can't collide with
+                it. React Router ranks the static "group" segment above the dynamic
+                :modelId, so there is no ambiguity. */}
+            <Route path="/models/group/:groupId" element={<GroupDetailPage />} />
             <Route path="/models/:modelId/inference" element={<InferencePage />} />
+            <Route path="/models/:modelId" element={<ModelDetailPage />} />
             <Route path="/queue" element={<QueuePage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
@@ -219,7 +229,7 @@ function AppNav() {
       </NavLink>
       <span className="mx-1 h-4 w-px bg-border-strong" aria-hidden />
       {APP_LINKS.map((l) => (
-        <TopLink key={l.to} to={l.to} label={l.label} />
+        <TopLink key={l.to} to={l.to} label={l.label} end={l.end} />
       ))}
       <GitHubIconLink />
     </nav>
@@ -240,10 +250,11 @@ function GitHubIconLink() {
   );
 }
 
-function TopLink({ to, label }: { to: string; label: string }) {
+function TopLink({ to, label, end }: { to: string; label: string; end?: boolean }) {
   return (
     <NavLink
       to={to}
+      end={end}
       className={({ isActive }) =>
         `hidden rounded-full px-3.5 py-1.5 text-sm font-semibold transition-all duration-150 sm:inline-block ${
           isActive

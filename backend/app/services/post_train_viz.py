@@ -159,6 +159,20 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
         failures.append(f"section_c: {exc}")
         log.write(f"  FAILED section_c: {exc}\n{traceback.format_exc()}")
 
+    # --- Section B violin (per-slide prototype consistency, F4) --------------
+    # The single-slide companion to the val-based Section B: cosine-sim of each
+    # patch to its assigned prototype center, for the SAME deterministic slide.
+    # Stored under a distinct `section_b_violin` key so the standalone model
+    # detail page shows A + violin + C + D consistently.
+    section_b_violin: dict | None = None
+    try:
+        section_b_violin = _render_section_b_violin(model, db, wsi_dir, log)
+        if section_b_violin:
+            successes += 1
+    except Exception as exc:  # noqa: BLE001 — never let the violin abort the rest
+        failures.append(f"section_b_violin: {exc}")
+        log.write(f"  FAILED section_b_violin: {exc}\n{traceback.format_exc()}")
+
     # --- Section B (validation-slide prototype consistency) -----------------
     # Heaviest render — runs the encoder over the fold's val slides (+ sampled
     # train slides). Skipped gracefully when the fold has no validation slides.
@@ -193,6 +207,8 @@ def handle_post_train_viz(*, db: Session, job: Job, log: JobLog) -> None:
         artifacts["section_c"] = section_c
     if section_b:
         artifacts["section_b"] = section_b
+    if section_b_violin:
+        artifacts["section_b_violin"] = section_b_violin
     model.viz_artifacts = json.dumps(artifacts) if artifacts else None
 
     model.viz_status = "ready" if successes > 0 else "failed"
@@ -243,65 +259,14 @@ def _render_section_a(model: Model, db: Session, wsi_dir, log: JobLog) -> dict |
 
     log.write(f"  section_a: rendering for slide {slide_id}")
 
-    # Run the encoder ONCE; reuse the assignments for every Section A render.
-    encoder = visualization._load_panther_encoder(model)
-    coords, feats, patch_size = visualization._load_h5(h5_path)
-    cluster_labels, _qq, mixture_probs = visualization._compute_assignments(encoder, feats)
-
-    section: dict = {"slide_id": slide_id, "roi_index": 0}
-
-    try:
-        out = visualization.render_wsi_thumbnail(
-            model, wsi_path, coords=coords, patch_size=patch_size
-        )
-        section["thumbnail"] = str(out)
-        log.write(f"    thumbnail: {out}")
-    except Exception as exc:  # noqa: BLE001
-        log.write(f"    FAILED thumbnail: {exc}\n{traceback.format_exc()}")
-
-    try:
-        out = visualization.render_assignment_heatmap_from_assignments(
-            model,
-            coords,
-            cluster_labels,
-            patch_size,
-            wsi_path,
-            downsample_target=visualization.SECTION_A_DOWNSAMPLE,
-            crop_to_tissue=True,
-            patch_borders=True,
-            out_path=visualization.section_a_dir(model) / f"assignment_map_{slide_id}.png",
-        )
-        section["assignment_map"] = str(out)
-        log.write(f"    assignment_map: {out}")
-    except Exception as exc:  # noqa: BLE001
-        log.write(f"    FAILED assignment_map: {exc}\n{traceback.format_exc()}")
-
-    try:
-        out = visualization.render_pi_c_barplot(model, mixture_probs)
-        section["pi_c"] = str(out)
-        log.write(f"    pi_c: {out}")
-    except Exception as exc:  # noqa: BLE001
-        log.write(f"    FAILED pi_c: {exc}\n{traceback.format_exc()}")
-
-    try:
-        raw, colored, bbox, used_idx, n_windows = visualization.render_roi_from_assignments(
-            model, coords, cluster_labels, patch_size, wsi_path, roi_index=0
-        )
-        section["roi_raw"] = str(raw)
-        section["roi_colored"] = str(colored)
-        section["roi_bbox"] = bbox
-        section["roi_index"] = used_idx
-        log.write(f"    roi: index {used_idx}/{n_windows} bbox={bbox}")
-    except Exception as exc:  # noqa: BLE001
-        log.write(f"    FAILED roi: {exc}\n{traceback.format_exc()}")
-
-    # Cache coords/labels so repick-ROI re-tiles without the encoder.
-    try:
-        visualization.save_section_a_cache(model, slide_id, coords, cluster_labels, patch_size)
-    except Exception as exc:  # noqa: BLE001
-        log.write(f"    WARNING: failed to write Section A repick cache: {exc}")
-
-    return section
+    # Delegate to the shared per-slide renderer (default out_dir = section_a_dir,
+    # so the train-time paths are identical). One encoder pass via
+    # get_assignments feeds the thumbnail / assignment map / π_c / ROI and
+    # populates the process-local assignment cache for the Section C / violin
+    # renders that follow for the SAME slide.
+    return visualization.render_section_a_for_slide(
+        model, slide_id, h5_path, wsi_path, log=log
+    )
 
 
 def _render_section_c(model: Model, db: Session, wsi_dir, umap_path, log: JobLog) -> dict | None:
@@ -342,6 +307,36 @@ def _render_section_c(model: Model, db: Session, wsi_dir, umap_path, log: JobLog
     log.write(f"    on_tissue: {out}")
 
     return {"slide_id": slide_id, "scatter": umap_path, "on_tissue": str(out)}
+
+
+def _render_section_b_violin(model: Model, db: Session, wsi_dir, log: JobLog) -> dict | None:
+    """Render the per-slide prototype-consistency violin (F4) for the SAME
+    deterministic slide as Section A.
+
+    Returns the `section_b_violin` dict to merge under model.viz_artifacts, or
+    None if the slide's h5 is unavailable. Reuses the memoized encoder pass from
+    `get_assignments`, so it adds no extra encoder run when Section A already ran.
+    """
+    from pathlib import Path
+
+    ids = pick_preview_slides(model, count=1)
+    if not ids:
+        log.write("  section_b_violin: no slide could be picked (train.csv missing/empty).")
+        return None
+    slide_id = ids[0]
+
+    h5_path = Path(model.features_dir) / f"{slide_id}.h5"
+    if not h5_path.is_file():
+        log.write(f"  section_b_violin: h5 not found for {slide_id} at {h5_path} — skipping.")
+        return None
+
+    log.write(f"  section_b_violin: rendering per-slide violin for slide {slide_id}")
+    _coords, feats, _ps = visualization._load_h5(h5_path)
+    _c, cluster_labels, _qq, _mix, _psz = visualization.get_assignments(model, slide_id, h5_path)
+    result = visualization.render_slide_violin(model, feats, cluster_labels)
+    result["slide_id"] = slide_id
+    log.write(f"    violin: {result['violin']}")
+    return result
 
 
 def _render_section_b(model: Model, log: JobLog) -> dict | None:

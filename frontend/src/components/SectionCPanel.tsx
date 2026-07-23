@@ -22,17 +22,35 @@ import {
  * `umap_path`. When `section_c` is absent but `umap_path` is present, show that
  * single scatter so older folds don't lose their UMAP.
  */
-export default function SectionCPanel({ model }: { model: ModelInfo }) {
+export default function SectionCPanel({
+  model,
+  onTissue,
+  slideId,
+}: {
+  model: ModelInfo;
+  /**
+   * Per-slide on-tissue colormap override (Compare page). The abstract scatter
+   * stays dataset-global (`section_c.scatter` / `umap_path`). When absent, the
+   * panel behaves exactly as on the model detail page.
+   */
+  onTissue?: string;
+  /** Slide id for the caption when an `onTissue` override is supplied. */
+  slideId?: string;
+}) {
   const section = model.viz_artifacts?.section_c;
-  const legacyOnly = !section && Boolean(model.umap_path);
+  // An explicit on-tissue override always uses the two-up layout, even if this
+  // model has no rendered section_c of its own (arbitrary compare slide).
+  const onTissueSrc = onTissue ?? section?.on_tissue;
+  const legacyOnly = !section && onTissue === undefined && Boolean(model.umap_path);
+  const captionSlide = slideId ?? section?.slide_id;
 
   return (
     <section className="space-y-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
         <SectionHeader title="Section C · Across the dataset" />
-        {section?.slide_id ? (
+        {captionSlide ? (
           <span className="font-mono text-[11px] text-ink-muted">
-            slide <span className="text-ink">{section.slide_id}</span>
+            slide <span className="text-ink">{captionSlide}</span>
           </span>
         ) : null}
       </div>
@@ -52,7 +70,7 @@ export default function SectionCPanel({ model }: { model: ModelInfo }) {
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           <Figure caption="On-tissue 2D embedding">
             <ZoomPanImage
-              src={resolveVizUrl(section?.on_tissue, () =>
+              src={resolveVizUrl(onTissueSrc, () =>
                 vizPlaceholderUrl('heatmap', {
                   label: 'On-tissue embedding',
                   width: 480,

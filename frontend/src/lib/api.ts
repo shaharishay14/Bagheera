@@ -143,13 +143,28 @@ export function getSplit(splitId: string): Promise<SplitInfo> {
 export function createSplit(payload: {
   dataset_name: string;
   source_csv: string;
-  k: number;
+  /** Omit for a single (all-train) split; required for K-fold. */
+  k?: number;
   seed: number;
+  /** "kfold" (default) partitions into K folds; "single" puts every slide in train. */
+  kind?: 'kfold' | 'single';
 }): Promise<SplitInfo> {
   return request('/api/splits', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+}
+
+/**
+ * Create a single, 100%-train split (no held-out val/test, one fold at `k=0`).
+ * Thin wrapper over `createSplit` with `kind:"single"` and no `k`.
+ */
+export function createSingleSplit(payload: {
+  dataset_name: string;
+  source_csv: string;
+  seed: number;
+}): Promise<SplitInfo> {
+  return createSplit({ ...payload, kind: 'single' });
 }
 
 // --- PANTHER --------------------------------------------------------------
@@ -256,6 +271,22 @@ export interface VizArtifacts {
   section_d?: SectionD;
 }
 
+/**
+ * Per-slide viz bundle returned by `selectRoi` when a **compare** slide is
+ * chosen (a `slide_id` was supplied). Mirrors {@link SectionA} plus the
+ * `on_tissue` colormap (Section C) and the `violin` chart (Section B) rendered
+ * for that specific slide. Every field is a viz_cache path — resolve via
+ * `resolveVizUrl`.
+ */
+export interface SlideVizArtifacts extends SectionA {
+  /** Per-slide 2D-embedding colormap painted on the slide (Section C). */
+  on_tissue?: string;
+  /** Per-prototype cosine-similarity distribution for this slide (Section B). */
+  violin?: string;
+  /** Per-prototype patch counts backing the violin (annotation only). */
+  violin_counts?: number[];
+}
+
 export interface ModelInfo {
   id: string;
   created_at: string;
@@ -279,6 +310,11 @@ export interface ModelInfo {
   seed: number;
   num_workers: number;
   status: ModelStatus;
+  /**
+   * How this model was produced: "single" for a standalone single-model run,
+   * or a legacy/null value for models that belong to a K-fold ModelGroup.
+   */
+  run_kind: string | null;
   prototypes_dir: string;
   prototype_files: string[];
   is_favorite: boolean;
@@ -324,10 +360,52 @@ export function startPantherKFoldRun(
   });
 }
 
-export function listModels(opts?: { groupId?: string; datasetName?: string }): Promise<ModelInfo[]> {
+/**
+ * Payload for a standalone single-model run — same PANTHER hyperparameters as
+ * the K-fold run, but trains exactly one model against the split's single
+ * (100%-train) fold. No `k`.
+ */
+export interface PantherSingleRunPayload {
+  model_name: string;
+  features_dir: string;
+  dataset_name: string;
+  split_id: string;
+  mode: PantherMode;
+  in_dim: number;
+  n_proto_patches: number;
+  n_proto: number;
+  n_init: number;
+  seed: number;
+  num_workers: number;
+}
+
+export interface PantherSingleStartResponse {
+  model_id: string;
+  job_id: string;
+  split_id: string;
+  split_name: string;
+}
+
+/** Queue a standalone single-model PANTHER run (returns immediately). */
+export function startPantherRun(
+  payload: PantherSingleRunPayload
+): Promise<PantherSingleStartResponse> {
+  return request('/api/panther/single-runs', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export function listModels(opts?: {
+  groupId?: string;
+  datasetName?: string;
+  /** Filter by production kind; pass "single" for standalone models. */
+  runKind?: string;
+}): Promise<ModelInfo[]> {
   const params = new URLSearchParams();
   if (opts?.groupId) params.set('group_id', opts.groupId);
   if (opts?.datasetName) params.set('dataset_name', opts.datasetName);
+  if (opts?.runKind) params.set('run_kind', opts.runKind);
   const qs = params.toString();
   return request(`/api/panther/models${qs ? `?${qs}` : ''}`);
 }
@@ -468,6 +546,122 @@ export function repickRoi(modelId: string): Promise<ModelInfo> {
   return request(`/api/models/${encodeURIComponent(modelId)}/repick-roi`, {
     method: 'POST',
   });
+}
+
+/** Response of {@link selectRoi} when a compare slide was chosen. */
+export interface SelectRoiResult {
+  status: 'ready';
+  artifacts: SlideVizArtifacts;
+}
+
+/**
+ * Manually place the Section A ROI at a point the user clicked on the natural
+ * assignment-map image. `fx`/`fy` are normalized coordinates in `[0, 1]` over
+ * that image (origin top-left).
+ *
+ * Two modes, discriminated by `slide_id`:
+ *   - `slide_id: null` (or omitted) — re-pick on the model's **preview** slide;
+ *     returns an updated {@link ModelInfo} (mirrors {@link repickRoi}). The new
+ *     pick lands under `viz_artifacts.section_a`.
+ *   - `slide_id: string` — pick on a **compare** slide; returns
+ *     {@link SelectRoiResult} with the per-slide `artifacts`.
+ *
+ * The caller knows which mode it invoked, so it narrows the union itself.
+ *
+ * Throws `ApiError` with:
+ *   - 404 — the model does not exist
+ *   - 409 — Section A has not been rendered yet (render it first)
+ *   - 422 — the clicked point has no valid tissue window
+ */
+export function selectRoi(
+  modelId: string,
+  body: { slide_id?: string | null; fx: number; fy: number }
+): Promise<ModelInfo | SelectRoiResult> {
+  return request(`/api/models/${encodeURIComponent(modelId)}/select-roi`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  });
+}
+
+// --- Datasets & model comparison ------------------------------------------
+
+/**
+ * Summary of one dataset that has at least one non-legacy `run_kind="single"`
+ * model — the unit the Model Comparison page picks from. `slide_count` is null
+ * when the dataset's slide inventory could not be resolved.
+ */
+export interface DatasetSummary {
+  dataset_name: string;
+  model_count: number;
+  slide_count: number | null;
+}
+
+/** One WSI in a dataset's slide inventory (Compare-page WSI selector). */
+export interface DatasetSlide {
+  slide_id: string;
+  wsi_path: string;
+  /** Whether the source WSI file was found on disk (disabled in the picker if not). */
+  has_wsi: boolean;
+  /** Ready-to-use `<img src>` for the slide thumbnail, or null when unavailable. */
+  thumbnail_url: string | null;
+}
+
+export interface DatasetSlidesResponse {
+  dataset_name: string;
+  features_dir: string;
+  wsi_dir: string;
+  slides: DatasetSlide[];
+  slide_count: number;
+  /** How many slides actually resolved a thumbnail — surfaces the F3 mismatch. */
+  thumbnails_found: number;
+  note?: string;
+}
+
+/**
+ * Result of asking a model to render a specific slide. Either a cache hit
+ * (`ready` + the per-slide manifest) or a queued render job (`rendering` +
+ * `job_id`) — poll {@link getSlideViz} until it flips to `ready`.
+ */
+export type RenderSlideResponse =
+  | { status: 'ready'; artifacts: SlideVizArtifacts }
+  | { status: 'rendering'; job_id: string };
+
+/** Lookup of an already-rendered per-slide manifest for a model. */
+export type SlideVizResponse =
+  | { status: 'ready'; artifacts: SlideVizArtifacts }
+  | { status: 'missing' };
+
+/** List datasets that have ≥1 comparable (non-legacy single) model. */
+export function listDatasets(): Promise<DatasetSummary[]> {
+  return request('/api/datasets');
+}
+
+/** The WSI inventory for a dataset (Compare-page slide picker). */
+export function getDatasetSlides(name: string): Promise<DatasetSlidesResponse> {
+  return request(`/api/datasets/${encodeURIComponent(name)}/slides`);
+}
+
+/** Non-legacy single models trained on a dataset, newest first. */
+export function getDatasetModels(name: string): Promise<ModelInfo[]> {
+  return request(`/api/datasets/${encodeURIComponent(name)}/models`);
+}
+
+/**
+ * Ask a model to render one slide's per-slide figure manifest. Returns the
+ * cached manifest immediately (`ready`) or queues a render job (`rendering`) —
+ * in the latter case poll {@link getSlideViz} on a 2 s cadence until `ready`.
+ */
+export function renderSlide(modelId: string, slideId: string): Promise<RenderSlideResponse> {
+  return request(`/api/models/${encodeURIComponent(modelId)}/render-slide`, {
+    method: 'POST',
+    body: JSON.stringify({ slide_id: slideId }),
+  });
+}
+
+/** Fetch an already-rendered per-slide manifest (used while polling a render). */
+export function getSlideViz(modelId: string, slideId: string): Promise<SlideVizResponse> {
+  const qs = new URLSearchParams({ slide_id: slideId });
+  return request(`/api/models/${encodeURIComponent(modelId)}/slide-viz?${qs.toString()}`);
 }
 
 // --- Prototype labels -----------------------------------------------------
@@ -742,6 +936,22 @@ export function vizPlaceholderUrl(
 export function vizFileUrl(path: string): string {
   // Backend's serve_viz accepts either absolute or relative paths.
   return `/api/viz/${path.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/**
+ * Build the URL for a slide thumbnail (used as an `<img src>` — the browser does
+ * the fetch, mirroring `vizFileUrl` / `vizPlaceholderUrl`). The backend returns a
+ * binary JPEG/PNG on success, or a 4xx on failure; callers should treat any load
+ * error as "no thumbnail" and fall back to a file icon (see `DirectoryBrowser`).
+ */
+export function slideThumbnailUrl(
+  path: string,
+  opts?: { featuresDir?: string; maxPx?: number }
+): string {
+  const params = new URLSearchParams({ path });
+  if (opts?.featuresDir) params.set('features_dir', opts.featuresDir);
+  if (opts?.maxPx != null) params.set('max_px', String(opts.maxPx));
+  return `/api/slide-thumbnail?${params.toString()}`;
 }
 
 /**

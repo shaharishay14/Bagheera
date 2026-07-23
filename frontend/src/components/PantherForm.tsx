@@ -3,12 +3,12 @@ import { useNavigate } from 'react-router-dom';
 import DirectoryBrowser from './DirectoryBrowser';
 import {
   ApiError,
-  createSplit,
+  createSingleSplit,
   getCsvRowCount,
   inspectCsv,
   listSplits,
   resolveFeaturesDir,
-  startPantherKFoldRun,
+  startPantherRun,
   type CsvInspectResult,
   type PantherMode,
   type RunResolveResponse,
@@ -26,7 +26,6 @@ interface PantherFormState {
   featuresDir: string;
   splitMode: SplitMode;
   sourceCsv: string;
-  k: number;
   splitSeed: number;
   selectedSplitId: string;
   pantherSeed: number;
@@ -43,7 +42,6 @@ const INITIAL: PantherFormState = {
   featuresDir: '',
   splitMode: 'create',
   sourceCsv: '',
-  k: 5,
   splitSeed: 42,
   selectedSplitId: '',
   pantherSeed: 1,
@@ -54,6 +52,28 @@ const INITIAL: PantherFormState = {
   nInit: 5,
   numWorkers: 10,
 };
+
+/**
+ * Clamp (and integer-round) a number into an optional [min, max] range. Pure and
+ * exported so it can be unit-tested and reused by every number input's blur.
+ */
+export function clampToRange(value: number, min?: number, max?: number): number {
+  let v = Math.round(value);
+  if (min != null && v < min) v = min;
+  if (max != null && v > max) v = max;
+  return v;
+}
+
+/**
+ * Effect key for the dataset-scoped split list + selection. Derived from the
+ * resolved run's `dataset_name` (a string) rather than the resolved object's
+ * identity, so re-resolving the same dataset — which returns a fresh object —
+ * yields the SAME key and does not reset the user's chosen split. Exported for
+ * unit testing this gate in isolation.
+ */
+export function splitScopeKey(resolved: RunResolveResponse | null): string | null {
+  return resolved?.dataset_name ?? null;
+}
 
 function shellQuote(s: string): string {
   if (!s) return s;
@@ -108,45 +128,58 @@ export default function PantherForm() {
   const update = <K extends keyof PantherFormState>(key: K, value: PantherFormState[K]) =>
     setState((prev) => ({ ...prev, [key]: value }));
 
+  // Resolve the features directory to a TRIDENT run + dataset. Debounced (~400ms)
+  // so we don't fire a request per keystroke, and — crucially — we do NOT wipe the
+  // previously resolved dataset while the user is mid-edit. The stale resolve stays
+  // put until the new one lands, which keeps the dataset-scoped split effect below
+  // from re-running (and losing the user's split selection) on unrelated edits.
   useEffect(() => {
     const dir = state.featuresDir.trim();
-    setResolved(null);
     setResolveError(null);
-    if (!dir) return;
+    if (!dir) {
+      setResolved(null);
+      setResolving(false);
+      return;
+    }
     let cancelled = false;
     setResolving(true);
-    (async () => {
+    const handle = window.setTimeout(async () => {
       try {
         const r = await resolveFeaturesDir(dir);
-        if (!cancelled) {
-          setResolved(r);
-          // in_dim is a fixed property of the features' encoder, not a tunable
-          // hyperparameter — auto-fill it whenever the encoder is recognized.
-          if (r.in_dim != null) {
-            setState((s) => ({ ...s, inDim: r.in_dim as number }));
-          }
+        if (cancelled) return;
+        setResolved(r);
+        // in_dim is a fixed property of the features' encoder, not a tunable
+        // hyperparameter — auto-fill it whenever the encoder is recognized.
+        if (r.in_dim != null) {
+          setState((s) => ({ ...s, inDim: r.in_dim as number }));
         }
       } catch (err) {
         if (!cancelled) {
+          setResolved(null);
           setResolveError(err instanceof ApiError ? err.message : 'Failed to resolve features directory.');
         }
       } finally {
         if (!cancelled) setResolving(false);
       }
-    })();
-    return () => { cancelled = true; };
+    }, 400);
+    return () => { cancelled = true; window.clearTimeout(handle); };
   }, [state.featuresDir]);
 
+  // Bind splits to the resolved DATASET NAME (a string), not the resolved object.
+  // `resolveFeaturesDir` returns a fresh object every call, so keying on identity
+  // would reset the split selection on every re-resolve even when the dataset is
+  // unchanged. Keying on the string means the selection survives unrelated edits.
+  const datasetName = splitScopeKey(resolved);
   useEffect(() => {
     setSplits([]);
     setSplitsError(null);
     setState((s) => ({ ...s, selectedSplitId: '' }));
-    if (!resolved) return;
+    if (!datasetName) return;
     let cancelled = false;
     setSplitsLoading(true);
     (async () => {
       try {
-        const res = await listSplits(resolved.dataset_name);
+        const res = await listSplits(datasetName);
         if (!cancelled) setSplits(res);
       } catch (err) {
         if (!cancelled) {
@@ -157,7 +190,7 @@ export default function PantherForm() {
       }
     })();
     return () => { cancelled = true; };
-  }, [resolved]);
+  }, [datasetName]);
 
   useEffect(() => {
     setSourceRows(null);
@@ -206,14 +239,13 @@ export default function PantherForm() {
 
   const splitDirRel = useMemo(() => {
     if (selectedSplit) {
-      return `datasets_splits/${selectedSplit.dataset_name}/${selectedSplit.split_name}/k=<i>`;
+      return `datasets_splits/${selectedSplit.dataset_name}/${selectedSplit.split_name}/k=0`;
     }
     const ds = resolved?.dataset_name ?? '<dataset>';
-    return `datasets_splits/${ds}/<split>/k=<i>`;
+    return `datasets_splits/${ds}/<split>/k=0`;
   }, [selectedSplit, resolved]);
 
   const commandPreview = useMemo(() => buildCommandPreview(state, splitDirRel), [state, splitDirRel]);
-  const effectiveK = selectedSplit?.k ?? state.k;
 
   // When the resolved encoder fixes in_dim, lock the field so it can't be hand-edited.
   const inDimLocked = !!resolved && resolved.in_dim != null;
@@ -225,7 +257,6 @@ export default function PantherForm() {
         ? 'Only letters, digits, underscores, and hyphens are allowed.'
         : null;
 
-  const kError = state.splitMode === 'create' && state.k < 3 ? 'K must be ≥ 3.' : null;
   const splitSeedError = state.splitMode === 'create' && state.splitSeed < 0 ? 'Split seed must be ≥ 0.' : null;
   const csvError = state.splitMode === 'create' && !state.sourceCsv.trim() ? 'Source CSV is required.' : null;
 
@@ -234,7 +265,7 @@ export default function PantherForm() {
     state.splitMode === 'create' && csvInspect != null && !csvInspect.has_slide_id;
 
   const canCreateSplit =
-    !!resolved && state.splitMode === 'create' && !kError && !splitSeedError && !csvError && !csvNoSlideId;
+    !!resolved && state.splitMode === 'create' && !splitSeedError && !csvError && !csvNoSlideId;
   const submitInvalid =
     !!modelError || !state.modelName || !resolved || !state.selectedSplitId || state.pantherSeed < 0 || csvNoSlideId;
 
@@ -251,10 +282,9 @@ export default function PantherForm() {
     if (!resolved || !canCreateSplit) return;
     setCreating(true);
     try {
-      const created = await createSplit({
+      const created = await createSingleSplit({
         dataset_name: resolved.dataset_name,
         source_csv: state.sourceCsv.trim(),
-        k: state.k,
         seed: state.splitSeed,
       });
       try {
@@ -281,7 +311,7 @@ export default function PantherForm() {
     }
     setSubmitting(true);
     try {
-      const res = await startPantherKFoldRun({
+      const res = await startPantherRun({
         model_name: state.modelName,
         features_dir: state.featuresDir.trim(),
         dataset_name: resolved.dataset_name,
@@ -294,7 +324,7 @@ export default function PantherForm() {
         seed: state.pantherSeed,
         num_workers: state.numWorkers,
       });
-      navigate(`/models/${encodeURIComponent(res.group_id)}`);
+      navigate(`/models/${encodeURIComponent(res.model_id)}`);
     } catch (err) {
       setSubmitError(err instanceof ApiError ? err.message : 'Failed to start training.');
     } finally {
@@ -310,8 +340,8 @@ export default function PantherForm() {
       <div className="mb-6">
         <h2 className="text-xl font-bold text-ink">Prototype training with PANTHER</h2>
         <p className="text-sm text-ink-muted">
-          Train K prototype models via K-fold cross-validation. Each form submission queues one
-          training job for K folds. Returns immediately; watch progress on the Models page.
+          Train a single prototype model on a 100%-train split. Each submission queues one
+          training job. Returns immediately; watch progress on the Models page.
         </p>
       </div>
 
@@ -362,9 +392,9 @@ export default function PantherForm() {
             className={inputCls(!!modelError)}
           />
           <p className="mt-1 text-xs text-ink-faint">
-            Each fold's model is named{' '}
+            The model is named{' '}
             <code className="font-mono">
-              {state.modelName || '<model_name>'}_k{'{i}'}_{'{rand8}'}
+              {state.modelName || '<model_name>'}_{'{rand8}'}
             </code>
             .
           </p>
@@ -385,7 +415,7 @@ export default function PantherForm() {
           ) : null}
           <div className="flex gap-2">
             <ToggleButton active={state.splitMode === 'create'} onClick={() => update('splitMode', 'create')}>
-              Create new K-fold split
+              Create single split
             </ToggleButton>
             <ToggleButton active={state.splitMode === 'existing'} onClick={() => update('splitMode', 'existing')}>
               Use existing split
@@ -438,22 +468,15 @@ export default function PantherForm() {
               </Field>
               <div className="grid grid-cols-2 gap-3">
                 <NumberInput
-                  label="K (folds)"
-                  value={state.k}
-                  onChange={(v) => update('k', Math.max(3, Math.round(v)))}
-                  min={3} step={1}
-                />
-                <NumberInput
                   label="Split seed"
                   value={state.splitSeed}
-                  onChange={(v) => update('splitSeed', Math.max(0, Math.round(v)))}
+                  onChange={(v) => update('splitSeed', v)}
                   min={0} step={1}
                 />
               </div>
               <p className="rounded border border-border bg-surface-subtle px-3 py-2 text-xs text-ink-muted">
-                K-fold CV produces K folds. With K={state.k}: each fold uses ~
-                {pctLabel((state.k - 2) / state.k)} train / {pctLabel(1 / state.k)} val /{' '}
-                {pctLabel(1 / state.k)} test. Every slide appears in test exactly once across folds.
+                A single split puts every slide into one <span className="font-mono">train</span> fold
+                (no held-out validation or test). The split seed only affects row ordering.
               </p>
               {createError ? <p className={errorText}>{createError}</p> : null}
               <button
@@ -473,7 +496,7 @@ export default function PantherForm() {
                 <p className="text-xs text-ink-faint">Loading splits…</p>
               ) : splits.length === 0 ? (
                 <p className="rounded border border-border bg-surface-subtle px-3 py-2 text-xs text-ink-muted">
-                  No saved splits for this dataset yet. Switch to <em>Create new K-fold split</em>.
+                  No saved splits for this dataset yet. Switch to <em>Create single split</em>.
                 </p>
               ) : (
                 <Field label="Existing split" htmlFor="existing_split">
@@ -487,11 +510,11 @@ export default function PantherForm() {
                     {splits.map((s) => {
                       const fold0 = s.per_fold_counts[0];
                       const sizes = fold0
-                        ? `train ${fold0.train} / val ${fold0.val} / test ${fold0.test}`
-                        : 'sizes unknown';
+                        ? `train ${fold0.train}${fold0.val || fold0.test ? ` / val ${fold0.val} / test ${fold0.test}` : ''}`
+                        : `${s.total_rows} rows`;
                       return (
                         <option key={s.id} value={s.id}>
-                          {s.split_name} · K={s.k}, {sizes}
+                          {s.split_name} · {sizes}
                         </option>
                       );
                     })}
@@ -518,7 +541,7 @@ export default function PantherForm() {
               </select>
             </Field>
             <NumberInput label="Input dimension" value={state.inDim}
-              onChange={(v) => update('inDim', Math.max(1, Math.round(v)))} min={1} step={1}
+              onChange={(v) => update('inDim', v)} min={1} step={1}
               disabled={inDimLocked}
               hint={
                 inDimLocked
@@ -527,15 +550,15 @@ export default function PantherForm() {
               }
             />
             <NumberInput label="Patches per prototype" value={state.nProtoPatches}
-              onChange={(v) => update('nProtoPatches', Math.max(1, Math.round(v)))} min={1} step={1000} />
+              onChange={(v) => update('nProtoPatches', v)} min={1} step={1000} />
             <NumberInput label="Number of prototypes" value={state.nProto}
-              onChange={(v) => update('nProto', Math.max(1, Math.round(v)))} min={1} step={1} />
+              onChange={(v) => update('nProto', v)} min={1} step={1} />
             <NumberInput label="K-means initializations" value={state.nInit}
-              onChange={(v) => update('nInit', Math.max(1, Math.round(v)))} min={1} step={1} />
+              onChange={(v) => update('nInit', v)} min={1} step={1} />
             <NumberInput label="Workers" value={state.numWorkers}
-              onChange={(v) => update('numWorkers', Math.max(0, Math.round(v)))} min={0} step={1} />
+              onChange={(v) => update('numWorkers', v)} min={0} step={1} />
             <NumberInput label="PANTHER --seed" value={state.pantherSeed}
-              onChange={(v) => update('pantherSeed', Math.max(0, Math.round(v)))} min={0} step={1} />
+              onChange={(v) => update('pantherSeed', v)} min={0} step={1} />
           </div>
           <p className="text-[11px] text-ink-faint">
             in_dim depends on the patch encoder used in TRIDENT: UNI=1024, UNI2-h=1536, Phikon=768.
@@ -545,7 +568,7 @@ export default function PantherForm() {
         <div>
           <div className="mb-2 flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-widest text-ink-faint">
-              Command preview (per fold)
+              Command preview
             </span>
             <button
               type="button"
@@ -559,8 +582,8 @@ export default function PantherForm() {
             {commandPreview}
           </pre>
           <p className="mt-1 text-xs text-ink-faint">
-            Runs from <code className="font-mono">$PANTHER_REPO_PATH/src</code>. The K commands are
-            executed sequentially by the worker thread.
+            Runs from <code className="font-mono">$PANTHER_REPO_PATH/src</code>, executed by the
+            worker thread.
           </p>
         </div>
 
@@ -583,7 +606,7 @@ export default function PantherForm() {
           disabled={submitting || submitInvalid}
           className="w-full rounded-full bg-grad-accent px-4 py-2.5 text-sm font-semibold text-white shadow-glow hover:shadow-glow-lg hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-60 disabled:shadow-none transition-all duration-150"
         >
-          {submitting ? `Queuing ${effectiveK} models…` : `Train ${effectiveK} Models`}
+          {submitting ? 'Queuing model…' : 'Train model'}
         </button>
       </form>
 
@@ -606,10 +629,6 @@ export default function PantherForm() {
   );
 }
 
-function pctLabel(fraction: number): string {
-  return `${Math.round(fraction * 100)}%`;
-}
-
 function ToggleButton({ active, onClick, children }: {
   active: boolean; onClick: () => void; children: React.ReactNode;
 }) {
@@ -628,11 +647,37 @@ function ToggleButton({ active, onClick, children }: {
   );
 }
 
-function NumberInput({ label, value, onChange, min, max, step, className, disabled, hint }: {
+/**
+ * Number input that keeps a local string buffer so the field can be cleared or
+ * mid-edited without the caret fighting the user. The parsed value propagates
+ * live on change (unclamped), and the value is clamped/rounded into [min, max]
+ * only on BLUR. External value changes (e.g. in_dim autofill) sync into the
+ * buffer while the field is not focused.
+ */
+export function NumberInput({ label, value, onChange, min, max, step, className, disabled, hint }: {
   label: string; value: number; onChange: (n: number) => void;
   min?: number; max?: number; step?: number; className?: string;
   disabled?: boolean; hint?: string;
 }) {
+  const [buf, setBuf] = useState<string>(() => String(value));
+  const [focused, setFocused] = useState(false);
+
+  useEffect(() => {
+    if (!focused) setBuf(Number.isFinite(value) ? String(value) : '');
+  }, [value, focused]);
+
+  const onCommit = () => {
+    setFocused(false);
+    const n = Number(buf);
+    if (buf.trim() === '' || !Number.isFinite(n)) {
+      setBuf(String(value));
+      return;
+    }
+    const clamped = clampToRange(n, min, max);
+    onChange(clamped);
+    setBuf(String(clamped));
+  };
+
   return (
     <div className={className}>
       <label className="mb-1 block text-xs font-semibold uppercase tracking-widest text-ink-faint">
@@ -640,13 +685,16 @@ function NumberInput({ label, value, onChange, min, max, step, className, disabl
       </label>
       <input
         type="number"
-        value={Number.isFinite(value) ? value : 0}
+        value={buf}
         min={min} max={max} step={step}
         disabled={disabled}
+        onFocus={() => setFocused(true)}
         onChange={(e) => {
+          setBuf(e.target.value);
           const n = Number(e.target.value);
-          onChange(Number.isFinite(n) ? n : 0);
+          if (e.target.value.trim() !== '' && Number.isFinite(n)) onChange(n);
         }}
+        onBlur={onCommit}
         className={`${inputCls()} disabled:cursor-not-allowed disabled:bg-surface-subtle disabled:text-ink-muted`}
       />
       {hint ? <p className="mt-1 text-xs text-ink-faint">{hint}</p> : null}

@@ -5,6 +5,8 @@ read endpoint plus an atomic reorder; cancel + re-run live on /api/jobs.
 """
 from __future__ import annotations
 
+import json
+
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
@@ -40,6 +42,17 @@ def _title_subtitle(db: Session, job: Job) -> tuple[str, str | None]:
         if inference is not None:
             return (f"Inference — {inference.wsi_filename}", None)
         return ("Inference", None)
+    if job.job_type == "render_slide":
+        slide_id = None
+        if job.params:
+            try:
+                slide_id = json.loads(job.params).get("slide_id")
+            except (json.JSONDecodeError, AttributeError):
+                slide_id = None
+        model = db.get(Model, job.ref_id)
+        name = (model.display_name or model.model_name) if model is not None else None
+        subtitle = " · ".join(p for p in (name, slide_id) if p) or None
+        return ("Render slide viz", subtitle)
     return (job.job_type, None)
 
 

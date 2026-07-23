@@ -93,6 +93,9 @@ class Model(Base):
     group_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     fold_index: Mapped[int] = mapped_column(Integer, nullable=False)
     fold_k: Mapped[int] = mapped_column(Integer, nullable=False)  # total K
+    # Run kind discriminator: "single" for the new standalone-model runs
+    # (group_id == id, fold_index=0, fold_k=1); NULL for legacy K-fold folds.
+    run_kind: Mapped[str | None] = mapped_column(String(16), nullable=True, default=None)
 
     # Inputs
     dataset_name: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
@@ -294,3 +297,7 @@ class Job(Base):
     # Order among waiting (queued) jobs; lower runs sooner. NULL once the job
     # leaves the queue (running/terminal). Assigned FIFO on enqueue.
     queue_position: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # Free-form JSON string of per-job parameters (e.g. {"slide_id": ...} for a
+    # render_slide job). NULL for jobs that carry no extra params. Handlers read
+    # it via json.loads(job.params or "{}").
+    params: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)

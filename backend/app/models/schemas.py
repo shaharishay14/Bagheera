@@ -65,7 +65,10 @@ class SplitInfo(BaseModel):
 class CreateSplitRequest(BaseModel):
     dataset_name: str = Field(..., pattern=DATASET_NAME_PATTERN, min_length=1, max_length=64)
     source_csv: str = Field(..., min_length=1)
-    k: int = Field(..., ge=2)
+    # "kfold" → K-fold CV (requires k>=2); "single" → one 100%-train fold (k ignored).
+    kind: Literal["kfold", "single"] = "kfold"
+    # Only meaningful for kind="kfold". Defaulted so a single-split request can omit it.
+    k: int = Field(2, ge=2)
     seed: int = Field(1, ge=0)
 
 
@@ -98,6 +101,40 @@ class PantherKFoldRunRequest(BaseModel):
     num_workers: int = Field(10, ge=0)
 
 
+class PantherSingleRunRequest(BaseModel):
+    """Kickoff payload for a standalone single PANTHER model (no K-fold, no group).
+
+    The referenced split must be a single ("100% train") split; every row lives
+    in its k=0/train.csv. Returns immediately with {model_id, job_id}; the single
+    subprocess runs inside the background worker thread.
+    """
+
+    # The user-typed name. Stored on the Model's base_name/display_name; the
+    # unique technical name is `{model_name}_{rand8}` (no `_k{i}` suffix).
+    model_name: str = Field(..., pattern=MODEL_NAME_PATTERN, min_length=1, max_length=128)
+    features_dir: str = Field(..., min_length=1)
+
+    dataset_name: str = Field(..., pattern=DATASET_NAME_PATTERN, min_length=1, max_length=64)
+    # Must reference an existing (single) splits row.
+    split_id: str = Field(..., min_length=1)
+
+    # PANTHER hyperparameters
+    mode: PantherMode = "faiss"
+    in_dim: int = Field(1024, ge=1)
+    n_proto_patches: int = Field(1_000_000, ge=1)
+    n_proto: int = Field(16, ge=1)
+    n_init: int = Field(5, ge=1)
+    seed: int = Field(1, ge=0)
+    num_workers: int = Field(10, ge=0)
+
+
+class PantherSingleRunStartResponse(BaseModel):
+    model_id: str
+    job_id: str
+    split_id: str
+    split_name: str
+
+
 class ModelInfo(BaseModel):
     id: str
     created_at: datetime
@@ -107,6 +144,9 @@ class ModelInfo(BaseModel):
     group_id: str
     fold_index: int
     fold_k: int
+    # "single" for standalone runs (group_id == id, fold_index=0, fold_k=1);
+    # null for legacy K-fold folds.
+    run_kind: Optional[str] = None
     dataset_name: str
     features_dir: str
     trident_run_id: Optional[str] = None
@@ -135,6 +175,35 @@ class ModelInfo(BaseModel):
     viz_artifacts: Optional[dict] = None
 
     model_config = {"from_attributes": True}
+
+
+# --- Datasets (Model Comparison page) -------------------------------------
+
+class DatasetSummary(BaseModel):
+    """One dataset that has at least one non-legacy (run_kind="single") model."""
+    dataset_name: str
+    model_count: int  # number of single (non-legacy) models for this dataset
+    # slide_count is deferred to the /slides endpoint (enumerating h5s is not
+    # free); left null here so the list stays cheap.
+    slide_count: Optional[int] = None
+
+
+class DatasetSlide(BaseModel):
+    slide_id: str  # the h5 file stem
+    wsi_path: Optional[str] = None  # resolved WSI path, or null if not found
+    has_wsi: bool = False
+    thumbnail_url: Optional[str] = None  # /api/slide-thumbnail?... when wsi_path resolved
+
+
+class DatasetSlidesResponse(BaseModel):
+    dataset_name: str
+    features_dir: str
+    wsi_dir: Optional[str] = None
+    slides: list[DatasetSlide]
+    slide_count: int
+    # F3 early-signal: how many slides have a TRIDENT-written thumbnail on disk.
+    thumbnails_found: int
+    note: Optional[str] = None  # set when features_dir is missing/unreadable
 
 
 class ModelGroupInfo(BaseModel):
@@ -213,6 +282,35 @@ class ShufflePreviewResponse(BaseModel):
     model_id: str
     preview_slide_ids: list[str]
     job_id: Optional[str] = None
+
+
+class RenderSlideRequest(BaseModel):
+    slide_id: str
+
+
+class RenderSlideResponse(BaseModel):
+    # "ready" (cache hit — artifacts populated), or "rendering" (job enqueued —
+    # job_id populated; poll /api/jobs with ref_table=models for progress).
+    status: str
+    artifacts: Optional[dict] = None
+    job_id: Optional[str] = None
+
+
+class SlideVizResponse(BaseModel):
+    # "ready" (manifest present — artifacts populated) or "missing".
+    status: str
+    artifacts: Optional[dict] = None
+
+
+class SelectRoiRequest(BaseModel):
+    # Manual point-based ROI pick. `slide_id=None` targets the Section A preview
+    # slide (persisted onto viz_artifacts.section_a); a `slide_id` targets that
+    # Compare slide (persisted onto its compare/{slide_id}/manifest.json). fx/fy
+    # are floats in [0,1] normalized over the natural assignment-map image; the
+    # route clamps them server-side.
+    slide_id: Optional[str] = None
+    fx: float
+    fy: float
 
 
 # --- Prototype labels --------------------------------------------------

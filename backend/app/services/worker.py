@@ -207,8 +207,15 @@ def enqueue_job(
     job_type: str,
     ref_table: str,
     ref_id: str,
+    params: dict | None = None,
 ) -> Job:
-    """Create a queued job row. The worker thread will pick it up."""
+    """Create a queued job row. The worker thread will pick it up.
+
+    `params` is an optional per-job parameter dict (e.g. {"slide_id": ...} for a
+    render_slide job); it's JSON-serialized into the `jobs.params` column and
+    read back by the handler via `json.loads(job.params or "{}")`.
+    """
+    import json
     import uuid
 
     job_id = str(uuid.uuid4())
@@ -221,6 +228,7 @@ def enqueue_job(
         status="queued",
         log_path=str(_log_path_for(job_id)),
         queue_position=next_queue_position(db),
+        params=json.dumps(params) if params else None,
     )
     db.add(job)
     db.commit()

@@ -127,8 +127,48 @@ def _train_one_fold(
     return model_status
 
 
+def _handle_single_model(*, db: Session, job: Job, log: JobLog, repo_path: str) -> None:
+    """Train ONE standalone model (ref_table='models'). No ModelGroup involved."""
+    model = db.get(Model, job.ref_id)
+    if model is None:
+        raise PantherTrainError(f"Model {job.ref_id!r} not found.")
+
+    split = db.get(Split, model.split_id)
+    if split is None:
+        raise PantherTrainError(f"Split {model.split_id!r} referenced by model not found.")
+
+    log.write(
+        f"Training standalone model {model.id} "
+        f"({model.display_name!r}, dataset={model.dataset_name!r}, split={split.split_name!r})"
+    )
+
+    try:
+        status = _train_one_fold(
+            db=db, log=log, model=model, split=split, repo_path=repo_path
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.write(f"!! standalone model {model.id} raised: {exc}")
+        model.status = "failed"
+        db.add(model)
+        db.commit()
+        status = "failed"
+
+    if status == "ready":
+        log.write("Training done. Model ready. Enqueuing post_train_viz job.")
+        enqueue_job(db, job_type="post_train_viz", ref_table="models", ref_id=model.id)
+    else:
+        log.write("Training done. Model failed; no viz enqueued.")
+
+
 def handle_panther_train(*, db: Session, job: Job, log: JobLog) -> None:
     repo_path = _require_panther_repo()
+
+    # New standalone single-model runs point at the models table directly.
+    if job.ref_table == "models":
+        _handle_single_model(db=db, job=job, log=log, repo_path=repo_path)
+        return
+
+    # Legacy K-fold path: ref_table == "model_groups".
     group = db.get(ModelGroup, job.ref_id)
     if group is None:
         raise PantherTrainError(f"ModelGroup {job.ref_id!r} not found.")

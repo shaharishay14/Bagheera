@@ -6,6 +6,8 @@ These endpoints live under /api/model-groups and /api/models, separate from
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
@@ -20,7 +22,11 @@ from app.models.schemas import (
     ModelGroupSummary,
     ModelInfo,
     ModelPatch,
+    RenderSlideRequest,
+    RenderSlideResponse,
+    SelectRoiRequest,
     ShufflePreviewResponse,
+    SlideVizResponse,
     SplitInfo,
     TridentParamsResponse,
 )
@@ -34,6 +40,21 @@ from app.services.visualization import VisualizationError
 from app.services.worker import enqueue_job
 
 router = APIRouter(prefix="/api", tags=["models"])
+
+# Slide IDs are WSI file stems; allow alnum + dot/underscore/hyphen. This blocks
+# path separators and traversal (`..`, `/`, `\`) before the id is interpolated
+# into a filesystem path (features_dir/{slide_id}.h5, compare/{slide_id}/).
+_SLIDE_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+
+def _validate_slide_id(slide_id: str) -> str:
+    sid = (slide_id or "").strip()
+    if not sid or ".." in sid or not _SLIDE_ID_RE.match(sid):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid slide_id {slide_id!r}.",
+        )
+    return sid
 
 
 # --- Helpers --------------------------------------------------------------
@@ -317,6 +338,182 @@ def repick_roi(model_id: str, db: Session = Depends(get_db)) -> ModelInfo:
     db.commit()
     db.refresh(model)
     return _model_to_info(model)
+
+
+@router.post("/models/{model_id}/select-roi", response_model=None)
+def select_roi(
+    model_id: str, payload: SelectRoiRequest, db: Session = Depends(get_db)
+):
+    """Manually re-pick the ROI at a clicked point on the assignment map.
+
+    Two modes, chosen by `payload.slide_id`:
+
+    - **Preview slide** (`slide_id is None`): targets the Section A panel. Requires
+      `viz_artifacts.section_a` (409 if absent), loads the Section A repick cache
+      from `section_a_dir`, renders the clicked ROI there, persists the new
+      `roi_raw`/`roi_colored`/`roi_bbox`/`roi_index` onto `viz_artifacts.section_a`,
+      and returns the updated `ModelInfo`.
+    - **Compare slide** (`slide_id` given): targets the Model Comparison per-slide
+      panel. Requires `compare/{slide_id}/manifest.json` (409 if absent), loads the
+      repick cache from that dir, renders the clicked ROI there, rewrites the
+      manifest's `roi_*`, and returns `{status:"ready", artifacts}` (same shape as
+      GET /slide-viz).
+
+    `fx, fy` are floats in [0,1] over the natural assignment-map image; clamped
+    server-side. **Synchronous** — uses the cached coords/labels (no encoder run),
+    like repick-roi. 404 missing model; 409 if the targeted panel/cache/WSI is
+    unavailable; 422 if the slide has no tissue window.
+    """
+    model = db.get(Model, model_id)
+    if model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found.")
+
+    fx = min(1.0, max(0.0, float(payload.fx)))
+    fy = min(1.0, max(0.0, float(payload.fy)))
+
+    preview_mode = payload.slide_id is None
+
+    if preview_mode:
+        try:
+            artifacts = json.loads(model.viz_artifacts) if model.viz_artifacts else {}
+        except json.JSONDecodeError:
+            artifacts = {}
+        section = artifacts.get("section_a")
+        if not section:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="No Section A render available to repick — render the model's visualizations first.",
+            )
+        out_dir = visualization.section_a_dir(model)
+        try:
+            slide_id, coords, cluster_labels, patch_size = visualization.load_section_a_cache(model)
+        except VisualizationError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+    else:
+        requested_id = _validate_slide_id(payload.slide_id)
+        out_dir = visualization.compare_slide_dir(model, requested_id)
+        manifest_path = out_dir / "manifest.json"
+        if not manifest_path.is_file():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"No per-slide render for {requested_id!r} to repick — render the slide first.",
+            )
+        try:
+            slide_id, coords, cluster_labels, patch_size = visualization.load_section_a_cache(
+                model, out_dir=out_dir
+            )
+        except VisualizationError as exc:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc))
+
+    wsi_dir = visualization.resolve_dataset_wsi_dir(model, db)
+    wsi_path = visualization.resolve_wsi_path(slide_id, wsi_dir) if wsi_dir else None
+    if wsi_path is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The WSI for this slide is no longer available.",
+        )
+
+    try:
+        raw, colored, bbox, used_idx, _n = visualization.render_roi_at_point(
+            model, coords, cluster_labels, patch_size, wsi_path, fx, fy, out_dir=out_dir
+        )
+    except VisualizationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc))
+
+    if preview_mode:
+        section["roi_raw"] = str(raw)
+        section["roi_colored"] = str(colored)
+        section["roi_bbox"] = bbox
+        section["roi_index"] = used_idx
+        artifacts["section_a"] = section
+        model.viz_artifacts = json.dumps(artifacts)
+        db.add(model)
+        db.commit()
+        db.refresh(model)
+        return _model_to_info(model)
+
+    try:
+        manifest = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, OSError):
+        manifest = {}
+    manifest["roi_raw"] = str(raw)
+    manifest["roi_colored"] = str(colored)
+    manifest["roi_bbox"] = bbox
+    manifest["roi_index"] = used_idx
+    manifest_path.write_text(json.dumps(manifest))
+    return SlideVizResponse(status="ready", artifacts=manifest)
+
+
+@router.post("/models/{model_id}/render-slide", response_model=RenderSlideResponse)
+def render_slide(
+    model_id: str, payload: RenderSlideRequest, db: Session = Depends(get_db)
+) -> RenderSlideResponse:
+    """On-demand render of one slide's per-slide viz panels (Model Comparison).
+
+    Cache-aware: if the slide's `compare/{slide_id}/manifest.json` already exists,
+    returns `{status: "ready", artifacts}` with no job. Otherwise enqueues a
+    `render_slide` job (`ref_table="models"`, `params={"slide_id": ...}`) and
+    returns `{status: "rendering", job_id}`; the caller polls /api/jobs
+    (ref_table=models) for progress, then GET /slide-viz for the result.
+
+    404 if the model is missing; 422 if the slide_id is malformed or its features
+    h5 is absent.
+    """
+    model = db.get(Model, model_id)
+    if model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found.")
+
+    slide_id = _validate_slide_id(payload.slide_id)
+
+    h5_path = Path(model.features_dir) / f"{slide_id}.h5"
+    if not h5_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"No features file for slide {slide_id!r} in this model's features dir.",
+        )
+
+    manifest_path = visualization.compare_slide_dir(model, slide_id) / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            artifacts = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            artifacts = None
+        if artifacts is not None:
+            return RenderSlideResponse(status="ready", artifacts=artifacts)
+
+    job = enqueue_job(
+        db,
+        job_type="render_slide",
+        ref_table="models",
+        ref_id=model.id,
+        params={"slide_id": slide_id},
+    )
+    return RenderSlideResponse(status="rendering", job_id=job.id)
+
+
+@router.get("/models/{model_id}/slide-viz", response_model=SlideVizResponse)
+def get_slide_viz(
+    model_id: str, slide_id: str = Query(...), db: Session = Depends(get_db)
+) -> SlideVizResponse:
+    """Read the per-slide render manifest for one slide.
+
+    `{status: "ready", artifacts}` when `compare/{slide_id}/manifest.json` exists,
+    else `{status: "missing"}` (the caller polls /api/jobs for render progress).
+    404 if the model is missing; 422 if the slide_id is malformed.
+    """
+    model = db.get(Model, model_id)
+    if model is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Model not found.")
+
+    sid = _validate_slide_id(slide_id)
+    manifest_path = visualization.compare_slide_dir(model, sid) / "manifest.json"
+    if manifest_path.is_file():
+        try:
+            artifacts = json.loads(manifest_path.read_text())
+        except (json.JSONDecodeError, OSError):
+            return SlideVizResponse(status="missing")
+        return SlideVizResponse(status="ready", artifacts=artifacts)
+    return SlideVizResponse(status="missing")
 
 
 @router.get("/models/{model_id}/trident-params", response_model=TridentParamsResponse)

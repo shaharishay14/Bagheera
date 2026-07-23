@@ -23,6 +23,8 @@ from app.models.schemas import (
     PantherKFoldRunRequest,
     PantherKFoldStartResponse,
     PantherRunInfo,
+    PantherSingleRunRequest,
+    PantherSingleRunStartResponse,
 )
 from app.services import panther_runner
 from app.services.fs import resolve_within_roots
@@ -42,6 +44,7 @@ def _model_to_info(row: Model) -> ModelInfo:
         group_id=row.group_id,
         fold_index=row.fold_index,
         fold_k=row.fold_k,
+        run_kind=row.run_kind,
         dataset_name=row.dataset_name,
         features_dir=row.features_dir,
         trident_run_id=row.trident_run_id,
@@ -111,6 +114,7 @@ def list_runs(
 def list_models(
     group_id: str | None = Query(None),
     dataset_name: str | None = Query(None),
+    run_kind: str | None = Query(None),
     db: Session = Depends(get_db),
 ) -> list[ModelInfo]:
     q = db.query(Model).order_by(Model.created_at.desc(), Model.fold_index.asc())
@@ -118,6 +122,8 @@ def list_models(
         q = q.filter(Model.group_id == group_id)
     if dataset_name:
         q = q.filter(Model.dataset_name == dataset_name)
+    if run_kind:
+        q = q.filter(Model.run_kind == run_kind)
     return [_model_to_info(r) for r in q.all()]
 
 
@@ -229,6 +235,105 @@ def start_run(
         split_id=split.id,
         split_name=split.split_name,
         model_ids=model_ids,
+    )
+
+
+@router.post("/single-runs", response_model=PantherSingleRunStartResponse)
+def start_single_run(
+    payload: PantherSingleRunRequest, db: Session = Depends(get_db)
+) -> PantherSingleRunStartResponse:
+    """Train ONE standalone PANTHER model (no K-fold, no ModelGroup).
+
+    The model is its own group (group_id == model_id, fold_index=0, fold_k=1,
+    run_kind="single") and trains against the single split's k=0 fold, whose
+    train.csv holds every row.
+    """
+    if not settings.panther_repo_path:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="PANTHER_REPO_PATH is not set on the server.",
+        )
+
+    features_dir = resolve_within_roots(payload.features_dir)
+    if not features_dir.is_dir():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="features_dir must be an existing directory.",
+        )
+
+    split = db.get(Split, payload.split_id)
+    if split is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown split_id: {payload.split_id!r}",
+        )
+    if split.dataset_name != payload.dataset_name:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"split_id {payload.split_id!r} belongs to dataset "
+                f"{split.dataset_name!r}, not {payload.dataset_name!r}."
+            ),
+        )
+
+    trident_run_id = _resolve_trident_run_id(db, features_dir)
+
+    # in_dim is a fixed property of the encoder's features; derive it from the
+    # resolved TRIDENT run and override the form value when the encoder is known.
+    in_dim = payload.in_dim
+    if trident_run_id is not None:
+        trun = db.get(TridentRun, trident_run_id)
+        if trun is not None:
+            derived = feature_dim_for(trun.patch_encoder)
+            if derived is not None:
+                in_dim = derived
+
+    model_id = str(uuid.uuid4())
+    rand8 = secrets.token_hex(4)
+    model_name = f"{payload.model_name}_{rand8}"
+    fold_abs = panther_runner.fold_dir_abs(
+        settings.panther_repo_path, payload.dataset_name, split.split_name, 0
+    )
+    prototypes_dir = fold_abs / "prototypes"
+    db.add(
+        Model(
+            id=model_id,
+            created_at=datetime.utcnow(),
+            base_name=payload.model_name,
+            model_name=model_name,
+            display_name=payload.model_name,
+            # A standalone model is its own group.
+            group_id=model_id,
+            fold_index=0,
+            fold_k=1,
+            run_kind="single",
+            dataset_name=payload.dataset_name,
+            features_dir=str(features_dir),
+            trident_run_id=trident_run_id,
+            split_id=split.id,
+            split_name=split.split_name,
+            split_dir_abs=str(fold_abs),
+            mode=payload.mode,
+            in_dim=in_dim,
+            n_proto_patches=payload.n_proto_patches,
+            n_proto=payload.n_proto,
+            n_init=payload.n_init,
+            seed=payload.seed,
+            num_workers=payload.num_workers,
+            status="running",
+            prototypes_dir=str(prototypes_dir),
+            viz_status="pending",
+        )
+    )
+    db.commit()
+
+    job = enqueue_job(db, job_type="panther_train", ref_table="models", ref_id=model_id)
+
+    return PantherSingleRunStartResponse(
+        model_id=model_id,
+        job_id=job.id,
+        split_id=split.id,
+        split_name=split.split_name,
     )
 
 

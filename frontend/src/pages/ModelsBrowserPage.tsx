@@ -5,7 +5,9 @@ import {
   ApiError,
   deleteModelGroup,
   listModelGroups,
+  listModels,
   type ModelGroupListItem,
+  type ModelInfo,
 } from '../lib/api';
 import { Chip, StatusPill } from '../components/ui';
 import ConfirmDeleteModal from '../components/ConfirmDeleteModal';
@@ -17,6 +19,7 @@ export default function ModelsBrowserPage() {
   const initialQ = searchParams.get('q') ?? '';
 
   const [groups, setGroups] = useState<ModelGroupListItem[]>([]);
+  const [models, setModels] = useState<ModelInfo[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,17 +41,26 @@ export default function ModelsBrowserPage() {
     });
   }, [q, datasetFilter, favoritesOnly, sort]);
 
+  // Standalone single models — the models endpoint only filters by dataset/kind,
+  // so search / favorites / sort are applied client-side (see `visibleModels`).
+  const fetchModels = useCallback(async (): Promise<ModelInfo[]> => {
+    return listModels({ runKind: 'single', datasetName: datasetFilter || undefined });
+  }, [datasetFilter]);
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     (async () => {
       try {
-        const res = await fetchGroups();
-        if (!cancelled) setGroups(res);
+        const [g, m] = await Promise.all([fetchGroups(), fetchModels()]);
+        if (!cancelled) {
+          setGroups(g);
+          setModels(m);
+        }
       } catch (err) {
         if (!cancelled) {
-          const msg = err instanceof ApiError ? err.message : 'Failed to load model groups.';
+          const msg = err instanceof ApiError ? err.message : 'Failed to load models.';
           setError(msg);
         }
       } finally {
@@ -56,7 +68,28 @@ export default function ModelsBrowserPage() {
       }
     })();
     return () => { cancelled = true; };
-  }, [fetchGroups]);
+  }, [fetchGroups, fetchModels]);
+
+  // Apply the shared filters/sort to standalone models client-side.
+  const visibleModels = useMemo(() => {
+    const needle = q.trim().toLowerCase();
+    let list = models.filter((m) => {
+      if (favoritesOnly && !m.is_favorite) return false;
+      if (needle) {
+        const hay = `${m.display_name} ${m.base_name} ${m.model_name}`.toLowerCase();
+        if (!hay.includes(needle)) return false;
+      }
+      return true;
+    });
+    list = [...list].sort((a, b) => {
+      if (sort === 'name') {
+        return (a.display_name || a.base_name).localeCompare(b.display_name || b.base_name);
+      }
+      const cmp = a.created_at.localeCompare(b.created_at);
+      return sort === 'created_asc' ? cmp : -cmp;
+    });
+    return list;
+  }, [models, q, favoritesOnly, sort]);
 
   const onConfirmDelete = async () => {
     if (!deleteTarget) return;
@@ -85,8 +118,9 @@ export default function ModelsBrowserPage() {
   const datasets = useMemo(() => {
     const s = new Set<string>();
     for (const g of groups) s.add(g.dataset_name);
+    for (const m of models) s.add(m.dataset_name);
     return Array.from(s).sort();
-  }, [groups]);
+  }, [groups, models]);
 
   const inputCls =
     'mt-1 block w-full rounded-md border border-border-strong bg-surface px-3 py-1.5 text-sm shadow-inner-sm focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent';
@@ -97,7 +131,7 @@ export default function ModelsBrowserPage() {
         <div>
           <h2 className="text-xl font-bold text-ink">Models</h2>
           <p className="text-sm text-ink-muted">
-            One card per training run. Click into a card to inspect each fold model.
+            Standalone models and legacy K-fold groups. Click a card to inspect its analysis.
           </p>
         </div>
         <Link
@@ -169,20 +203,39 @@ export default function ModelsBrowserPage() {
 
       {loading ? (
         <p className="text-sm text-ink-muted">Loading…</p>
-      ) : groups.length === 0 ? (
+      ) : visibleModels.length === 0 && groups.length === 0 ? (
         <EmptyState />
       ) : (
-        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {groups.map((g) => (
-            <GroupCard
-              key={g.id}
-              group={g}
-              onRequestDelete={() => {
-                setDeleteError(null);
-                setDeleteTarget(g);
-              }}
-            />
-          ))}
+        <div className="space-y-8">
+          {visibleModels.length > 0 ? (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+              {visibleModels.map((m) => (
+                <ModelCard key={m.id} model={m} />
+              ))}
+            </div>
+          ) : null}
+
+          {groups.length > 0 ? (
+            <div>
+              {visibleModels.length > 0 ? (
+                <h3 className="mb-3 text-[11px] font-semibold uppercase tracking-widest text-ink-faint">
+                  Legacy K-fold groups
+                </h3>
+              ) : null}
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+                {groups.map((g) => (
+                  <GroupCard
+                    key={g.id}
+                    group={g}
+                    onRequestDelete={() => {
+                      setDeleteError(null);
+                      setDeleteTarget(g);
+                    }}
+                  />
+                ))}
+              </div>
+            </div>
+          ) : null}
         </div>
       )}
 
@@ -226,6 +279,47 @@ function EmptyState() {
   );
 }
 
+function ModelCard({ model }: { model: ModelInfo }) {
+  return (
+    <Link
+      to={`/models/${encodeURIComponent(model.id)}`}
+      className="group relative flex flex-col gap-2 rounded-lg border border-border bg-surface p-4 shadow-card transition-all duration-150 hover:border-border-strong hover:shadow-card-hover"
+    >
+      <div className="flex items-start justify-between gap-2">
+        <h3 className="line-clamp-2 text-base font-semibold text-ink group-hover:text-accent">
+          {model.display_name || model.base_name}
+        </h3>
+        <ModelStatusPill model={model} />
+      </div>
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <Chip mono>{model.dataset_name}</Chip>
+        <span className="text-ink-muted">
+          n_proto={model.n_proto} · {model.mode}
+        </span>
+      </div>
+      <div className="mt-1 flex items-center justify-between gap-2 text-xs text-ink-faint">
+        <span>{new Date(model.created_at).toLocaleString()}</span>
+        {model.is_favorite ? (
+          <span className="inline-flex items-center gap-1 text-[var(--s-warn-text)]">
+            <StarIcon filled /> favorite
+          </span>
+        ) : null}
+      </div>
+    </Link>
+  );
+}
+
+/** Combined training + viz status for a standalone model card. */
+function ModelStatusPill({ model }: { model: ModelInfo }) {
+  if (model.status !== 'ready') {
+    return <StatusPill status={model.status} />;
+  }
+  if (model.viz_status !== 'ready') {
+    return <StatusPill status={model.viz_status} label={`viz: ${model.viz_status}`} />;
+  }
+  return <StatusPill status="ready" />;
+}
+
 function GroupCard({
   group,
   onRequestDelete,
@@ -236,7 +330,7 @@ function GroupCard({
   const s = group.summary;
   return (
     <Link
-      to={`/models/${encodeURIComponent(group.id)}`}
+      to={`/models/group/${encodeURIComponent(group.id)}`}
       className="group relative flex flex-col gap-2 rounded-lg border border-border bg-surface p-4 shadow-card transition-all duration-150 hover:border-border-strong hover:shadow-card-hover"
     >
       <div className="flex items-start justify-between gap-2">
@@ -247,6 +341,7 @@ function GroupCard({
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
         <Chip mono>{group.dataset_name}</Chip>
+        <Chip>legacy K-fold</Chip>
         <span className="text-ink-muted">
           K={group.k} · n_proto={group.n_proto} · {group.mode}
         </span>

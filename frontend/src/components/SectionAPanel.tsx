@@ -1,15 +1,27 @@
 import { useEffect, useState } from 'react';
-import { FiRefreshCw } from 'react-icons/fi';
-import ZoomPanImage from './ZoomPanImage';
+import { FiCrosshair, FiRefreshCw } from 'react-icons/fi';
+import ZoomPanImage, { type Transform } from './ZoomPanImage';
 import { SectionHeader } from './ui';
 import {
   ApiError,
   repickRoi,
   resolveVizUrl,
+  selectRoi,
   vizPlaceholderUrl,
   type ModelInfo,
   type SectionA,
+  type SelectRoiResult,
 } from '../lib/api';
+
+/** Map an ROI-action error to the same inline copy used across repick/select. */
+function roiErrorMessage(err: unknown, verb: 'repick' | 'select'): string {
+  if (err instanceof ApiError) {
+    if (err.status === 409) return `Render Section A first, then you can ${verb} an ROI.`;
+    if (err.status === 422) return 'No tissue window available to pick an ROI from.';
+    return err.message;
+  }
+  return verb === 'repick' ? 'Failed to repick ROI.' : 'Failed to select an ROI.';
+}
 
 /**
  * Section A of the per-fold Analysis view — mirrors the PANTHER paper's
@@ -25,40 +37,91 @@ import {
  * Every image degrades to a labeled placeholder via `resolveVizUrl` so the
  * layout stays coherent during partial-success / pre-render states.
  */
-export default function SectionAPanel({ model }: { model: ModelInfo }) {
+export default function SectionAPanel({
+  model,
+  slideId,
+  section: sectionOverride,
+  imageTransform,
+  onImageTransformChange,
+}: {
+  model: ModelInfo;
+  slideId?: string;
+  /**
+   * Explicit Section-A source. When set (Compare page, an arbitrary slide's
+   * render-slide manifest) it seeds the panel instead of `model.viz_artifacts`.
+   * Its Repick/Select still operate on `slideId`.
+   */
+  section?: SectionA;
+  /** Controlled pan/zoom for the row-1 images — used to sync across panels. */
+  imageTransform?: Transform;
+  onImageTransformChange?: (t: Transform) => void;
+}) {
   // Local mirror so a repick swaps images without a full group reload. Reseed
   // whenever the model (or its rendered Section A) changes underneath us.
-  const [section, setSection] = useState<SectionA | undefined>(model.viz_artifacts?.section_a);
+  const [section, setSection] = useState<SectionA | undefined>(
+    sectionOverride ?? model.viz_artifacts?.section_a,
+  );
   const [repicking, setRepicking] = useState(false);
-  const [repickError, setRepickError] = useState<string | null>(null);
+  // One-shot "select" mode: armed → next click on the assignment map picks the ROI.
+  const [armed, setArmed] = useState(false);
+  const [selecting, setSelecting] = useState(false);
+  // Shared inline error region for both repick and select (one action at a time).
+  const [actionError, setActionError] = useState<string | null>(null);
 
   useEffect(() => {
-    setSection(model.viz_artifacts?.section_a);
-    setRepickError(null);
-  }, [model.id, model.viz_artifacts?.section_a]);
+    setSection(sectionOverride ?? model.viz_artifacts?.section_a);
+    setActionError(null);
+    setArmed(false);
+  }, [model.id, model.viz_artifacts?.section_a, sectionOverride]);
 
   const rendered = Boolean(section);
+  const busy = repicking || selecting;
 
   const onRepick = async () => {
+    setArmed(false);
     setRepicking(true);
-    setRepickError(null);
+    setActionError(null);
     try {
       const updated = await repickRoi(model.id);
       setSection(updated.viz_artifacts?.section_a);
     } catch (err) {
-      if (err instanceof ApiError) {
-        if (err.status === 409) {
-          setRepickError('Render Section A first, then you can repick an ROI.');
-        } else if (err.status === 422) {
-          setRepickError('No tissue window available to pick an ROI from.');
-        } else {
-          setRepickError(err.message);
-        }
-      } else {
-        setRepickError('Failed to repick ROI.');
-      }
+      setActionError(roiErrorMessage(err, 'repick'));
     } finally {
       setRepicking(false);
+    }
+  };
+
+  // Fired when the user clicks a point on the assignment map while armed.
+  // fx,fy ∈ [0,1] over the natural image. One-shot: disarm immediately.
+  const onSelectPoint = async (fx: number, fy: number) => {
+    setArmed(false);
+    setSelecting(true);
+    setActionError(null);
+    try {
+      const res = await selectRoi(model.id, { slide_id: slideId ?? null, fx, fy });
+      if (slideId) {
+        // Compare slide → per-slide artifacts; swap just the ROI-relevant fields.
+        const { artifacts } = res as SelectRoiResult;
+        setSection((prev) =>
+          prev
+            ? {
+                ...prev,
+                roi_raw: artifacts.roi_raw,
+                roi_colored: artifacts.roi_colored,
+                roi_bbox: artifacts.roi_bbox,
+                roi_index: artifacts.roi_index,
+              }
+            : prev,
+        );
+      } else {
+        // Preview slide → updated ModelInfo (mirrors onRepick).
+        const updated = res as ModelInfo;
+        setSection(updated.viz_artifacts?.section_a);
+      }
+    } catch (err) {
+      setActionError(roiErrorMessage(err, 'select'));
+    } finally {
+      setSelecting(false);
     }
   };
 
@@ -88,6 +151,8 @@ export default function SectionAPanel({ model }: { model: ModelInfo }) {
             )}
             alt="Whole-slide H&E thumbnail"
             className="aspect-[4/3] rounded-lg border border-border"
+            transform={imageTransform}
+            onTransformChange={onImageTransformChange}
           />
         </Figure>
         <Figure caption="Prototypical Assignment Map">
@@ -96,7 +161,11 @@ export default function SectionAPanel({ model }: { model: ModelInfo }) {
               vizPlaceholderUrl('heatmap', { label: 'Assignment map', width: 480, height: 360 }),
             )}
             alt="Hi-res prototype assignment overlay"
-            className="aspect-[4/3] rounded-lg border border-border"
+            className={`aspect-[4/3] rounded-lg border ${armed ? 'border-accent ring-2 ring-accent/40' : 'border-border'}`}
+            armed={armed}
+            onImageClick={onSelectPoint}
+            transform={imageTransform}
+            onTransformChange={onImageTransformChange}
           />
         </Figure>
       </div>
@@ -115,21 +184,47 @@ export default function SectionAPanel({ model }: { model: ModelInfo }) {
               </span>
             ) : null}
           </div>
-          <button
-            type="button"
-            onClick={onRepick}
-            disabled={repicking}
-            className="inline-flex items-center gap-1.5 rounded-full border border-border-strong bg-surface px-3 py-1.5 text-xs font-semibold text-ink hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
-            title="Auto-pick a different region of interest"
-          >
-            <FiRefreshCw size={12} className={repicking ? 'animate-spin' : ''} />
-            {repicking ? 'Repicking…' : 'Repick ROI'}
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                setActionError(null);
+                setArmed((a) => !a);
+              }}
+              disabled={busy || !rendered}
+              aria-pressed={armed}
+              className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                armed
+                  ? 'border-accent bg-accent text-white hover:bg-accent-dark'
+                  : 'border-border-strong bg-surface text-ink hover:bg-surface-subtle'
+              }`}
+              title="Click a point on the assignment map to place the ROI there"
+            >
+              <FiCrosshair size={12} className={selecting ? 'animate-spin' : ''} />
+              {selecting ? 'Selecting…' : armed ? 'Cancel select' : 'Select'}
+            </button>
+            <button
+              type="button"
+              onClick={onRepick}
+              disabled={busy}
+              className="inline-flex items-center gap-1.5 rounded-full border border-border-strong bg-surface px-3 py-1.5 text-xs font-semibold text-ink hover:bg-surface-subtle disabled:cursor-not-allowed disabled:opacity-50 transition-colors"
+              title="Auto-pick a different region of interest"
+            >
+              <FiRefreshCw size={12} className={repicking ? 'animate-spin' : ''} />
+              {repicking ? 'Repicking…' : 'Repick ROI'}
+            </button>
+          </div>
         </div>
 
-        {repickError ? (
+        {armed ? (
+          <p className="mt-2 rounded-md border border-accent/40 bg-accent-muted px-2.5 py-1.5 text-[11px] text-accent-dark">
+            Click a point on the assignment map to place the ROI there.
+          </p>
+        ) : null}
+
+        {actionError ? (
           <p className="mt-2 rounded-md border border-[var(--s-warn-border)] bg-[var(--s-warn-bg)] px-2.5 py-1.5 text-[11px] text-[var(--s-warn-text)]">
-            {repickError}
+            {actionError}
           </p>
         ) : null}
 

@@ -15,7 +15,7 @@ from app.db.models import Split
 from app.models.schemas import CreateSplitRequest, SplitInfo
 from app.services import panther_runner
 from app.services.fs import resolve_within_roots
-from app.services.splitter import SplitterError, create_kfold_split
+from app.services.splitter import SplitterError, create_kfold_split, create_single_split
 
 router = APIRouter(prefix="/api/splits", tags=["splits"])
 
@@ -51,18 +51,27 @@ def create_split_record(
     source_csv: Path,
     k: int,
     seed: int,
+    kind: str = "kfold",
 ) -> Split:
     output_root = _output_root_for(dataset_name)
     output_root.mkdir(parents=True, exist_ok=True)
 
     try:
-        info = create_kfold_split(
-            dataset_name=dataset_name,
-            source_csv=source_csv,
-            output_root=output_root,
-            k=k,
-            seed=seed,
-        )
+        if kind == "single":
+            info = create_single_split(
+                dataset_name=dataset_name,
+                source_csv=source_csv,
+                output_root=output_root,
+                seed=seed,
+            )
+        else:
+            info = create_kfold_split(
+                dataset_name=dataset_name,
+                source_csv=source_csv,
+                output_root=output_root,
+                k=k,
+                seed=seed,
+            )
     except SplitterError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
     except PermissionError as exc:
@@ -103,6 +112,7 @@ def create_split(payload: CreateSplitRequest, db: Session = Depends(get_db)) -> 
         source_csv=source_csv,
         k=payload.k,
         seed=payload.seed,
+        kind=payload.kind,
     )
     return _to_info(row)
 

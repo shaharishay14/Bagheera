@@ -41,11 +41,19 @@ and the route table.
 | Route | Page | Purpose |
 | --- | --- | --- |
 | `/training/trident` | `TridentTrainingPage` | Start a TRIDENT feature-extraction run. |
-| `/training/panther` | `PantherTrainingPage` | Configure a split + hyperparameters, start K-fold training. |
-| `/models` | `ModelsBrowserPage` | Browse training runs (one card per Model Group). |
-| `/models/:groupId` | `GroupDetailPage` | Inspect each fold of a group. |
-| `/models/:modelId/inference` | `InferencePage` | Run a fold model on new slides. |
+| `/training/panther` | `PantherTrainingPage` | Configure a single split + hyperparameters, train one standalone model. |
+| `/training/panther/compare` | `PantherComparePage` | Render one WSI through up to 4 of a dataset's models, side by side. |
+| `/models` | `ModelsBrowserPage` | Browse standalone models (flat cards) + legacy K-fold groups. |
+| `/models/:modelId` | `ModelDetailPage` | Inspect one standalone model (analysis, labels, notes). |
+| `/models/group/:groupId` | `GroupDetailPage` | Legacy: inspect each fold of a K-fold group. |
+| `/models/:modelId/inference` | `InferencePage` | Run a model on new slides. |
 | `/`, `/training`, `*` | → redirect to `/training/trident` | |
+
+**Route collision note.** `/models/:modelId` (standalone) and the legacy group
+detail page can't share a `:id` slot, so legacy groups live under an explicit
+static `/models/group/:groupId`. React Router ranks the static `group` segment
+above the dynamic `:modelId`, and `/models/:modelId/inference` above bare
+`/models/:modelId`, so all three resolve unambiguously.
 
 `main.tsx` mounts `<App/>` in StrictMode; `index.css` is just the three Tailwind layers
 plus a full-height root.
@@ -67,12 +75,17 @@ the UI in lockstep with the backend.
 
 **Endpoint groups** (mirrors the backend): filesystem (`getRoots`, `listDirectory`,
 `getCsvRowCount`), TRIDENT (`startTridentRun`, `resolveFeaturesDir`), splits
-(`listSplits`, `getSplit`, `createSplit`), PANTHER (`startPantherKFoldRun`, `listModels`),
+(`listSplits`, `getSplit`, `createSplit`, `createSingleSplit`), PANTHER
+(`startPantherRun` for standalone single models, `startPantherKFoldRun` for legacy K-fold,
+`listModels` with an optional `runKind` filter),
 groups/models (`listModelGroups`, `getModelGroup`, `patchModelGroup`, `getModel`,
 `patchModel`, `shuffleModelPreview`, `getModelTridentParams`), prototype labels, model
 notes, inferences (`createInferences`, `lookupInference`, `listInferences`, `getInference`,
 `rerunInference`, `getInferenceBatch`, `listInferenceExamplePatches`), inference notes,
-and jobs (`listJobs`, `getJob`, `retryJob`).
+datasets/compare (`listDatasets`, `getDatasetSlides`, `getDatasetModels`, `renderSlide`,
+`getSlideViz` — the Model Comparison page's dataset→slide→models flow; `renderSlide` returns
+either `{status:'ready', artifacts}` on a cache hit or `{status:'rendering', job_id}` to poll
+`getSlideViz` on the 2 s cadence), and jobs (`listJobs`, `getJob`, `retryJob`).
 
 Two functions intentionally bypass `request` because they need custom status handling:
 `lookupInference` (treats `404` as "no cache hit" → returns `null`) and the `DELETE`
@@ -105,26 +118,57 @@ backend's argv. Submit calls `startTridentRun` — which **blocks** until TRIDEN
 then shows the run result or the failure's stderr.
 
 ### `PantherTrainingPage` → `PantherForm`
-The most stateful form. Flow:
+The most stateful form. Trains **one standalone model** on a single (100%-train) split.
+Flow:
 
-1. User enters a **features directory**; a debounced effect calls `resolveFeaturesDir` to
-   bind it to a `TridentRun` + dataset (shown as a chip). Everything downstream is gated
-   on a successful resolve.
-2. **Split section** — toggle between *Create new K-fold split* (browse a source CSV →
-   `getCsvRowCount` shows row count → `createSplit`) and *Use existing split* (a dropdown
-   loaded via `listSplits(dataset)`). Creating a split auto-switches to "existing" with it
-   selected.
-3. **PANTHER parameters** — mode, in_dim, n_proto, n_proto_patches, n_init, num_workers,
-   seed, all as validated number inputs, with a per-fold command preview.
-4. Submit → `startPantherKFoldRun` → navigate to `/models/{group_id}`. The button label
-   reflects the effective K (`Train 5 Models`).
+1. User enters a **features directory**; a **debounced** (~400 ms) effect calls
+   `resolveFeaturesDir` to bind it to a `TridentRun` + dataset (shown as a chip). The stale
+   resolve is kept in place while typing so the dataset-scoped split effect below doesn't
+   thrash. Everything downstream is gated on a successful resolve.
+2. **Split section** — toggle between *Create single split* (browse a source CSV →
+   `getCsvRowCount` + `inspectCsv` notices → `createSingleSplit`, which posts `kind:"single"`
+   with no `k`) and *Use existing split* (a dropdown loaded via `listSplits(dataset)`).
+   Creating a split auto-switches to "existing" with it selected. The split list is keyed on
+   the resolved **`dataset_name` string** (`splitScopeKey`), not the resolved object's
+   identity — so re-resolving the same dataset never clears the user's chosen split.
+3. **PANTHER parameters** — mode, in_dim (locked from the encoder), n_proto, n_proto_patches,
+   n_init, num_workers, seed, all via `NumberInput` (local string buffer; clamps to
+   `[min,max]` only on **blur** via `clampToRange`, so fields can be cleared / mid-edited).
+   Command preview uses the single-fold split dir `…/{split}/k=0`.
+4. Submit → `startPantherRun` (`POST /api/panther/single-runs`) → navigate to
+   `/models/{model_id}`. Button label: `Train model`.
+
+### `PantherComparePage`
+Renders one WSI through several models side by side (`/training/panther/compare`). A strict
+top-down gate: **① Dataset** (`listDatasets` — only datasets with ≥1 non-legacy single model;
+selecting one resets everything below) → **② WSI** (`getDatasetSlides`, a lazy-thumbnail grid
+with an icon fallback; `has_wsi=false` tiles are disabled; a subtle `thumbnails: N/total`
+diagnostic surfaces the F3 mismatch) → **③ Models** ("Add model" dropdown over
+`getDatasetModels`, max 4, each slot has **Swap** + **Remove**) → **④ Grid** of
+`CompareModelPanel`s (1–3 models = one responsive row via `compareGridClass`, 4 = a 2×2 grid).
+A **Sync zoom/pan** checkbox lifts one `Transform` in page state and feeds it to every panel so
+pan/zoom mirror across columns; off, each panel is independent. `compareGridClass` is pure and
+unit-tested.
 
 ### `ModelsBrowserPage`
-A filterable card grid of Model Groups. Controls: search (`q`), dataset filter, sort
-(`created_desc|created_asc|name`), favorites-only. Each `GroupCard` shows the display name,
-dataset chip, `K · n_proto · mode`, created time, and a **StatusPill** computed from the
-group's fold summary (training… / N/total ready / failed / mixed). Empty state links to the
-PANTHER page.
+A filterable card grid. Fetches **both** standalone models (`listModels({runKind:'single'})`,
+rendered as flat `ModelCard`s linking to `/models/:modelId`) and legacy K-fold groups
+(`listModelGroups`, rendered as `GroupCard`s with a *legacy K-fold* chip, linking to
+`/models/group/:groupId`). Controls: search (`q`), dataset filter, sort
+(`created_desc|created_asc|name`), favorites-only — applied server-side for groups and
+client-side for standalone models. Empty state (both empty) links to the PANTHER page.
+
+### `ModelDetailPage`
+The inspection surface for one standalone model (`/models/:modelId`). Header: favorite star
++ inline-editable name (`patchModel`), a *single model* chip, dataset/status/n_proto/mode/
+created metadata, split summary, and an **Inference →** link. Body reuses the paper-style
+analysis panels (`SectionAPanel` — see its ROI controls below —, `SectionCPanel`,
+`SectionDPanel`, and `SectionBPanel` only
+when `viz_artifacts.section_b` exists — single models have no held-out slides, so it usually
+degrades to a muted note), plus `PrototypeLabels`, a read-only params/paths dump, a
+`NotesThread` (model target), and a `JobStatusPoller` (`refTable="models"`) that reloads the
+model on job finish. An active-jobs banner and a failure-log link appear on the relevant
+states.
 
 ### `GroupDetailPage`
 The inspection surface for one group's K folds.
@@ -174,7 +218,7 @@ Run a fold model on new slides. The richest page.
 
 | Component | Responsibility |
 | --- | --- |
-| **`DirectoryBrowser`** | Modal file/dir picker (rendered via portal). Backed by `/api/fs/*`. Supports `dir` vs `file` mode, extension filtering, multi-select (checkboxes), breadcrumb + root switcher, and full keyboard navigation (arrows, Enter, Space, Esc). Single- and multi-select variants are distinguished by `onSelect` vs `onSelectMulti`. |
+| **`DirectoryBrowser`** | Modal file/dir picker (rendered via portal). Backed by `/api/fs/*`. Supports `dir` vs `file` mode, extension filtering, multi-select (checkboxes), breadcrumb + root switcher, and full keyboard navigation (arrows, Enter, Space, Esc). Single- and multi-select variants are distinguished by `onSelect` vs `onSelectMulti`. Optional `thumbnailFor(path) => url` prop: in `file` mode, each file row renders a small lazy `<img>` (that URL) in place of the file icon, falling back to the icon on load error — used by `InferencePage` with `slideThumbnailUrl` for WSI previews; omit for icon-only pickers (e.g. CSV). |
 | **`EncoderSelect`** | The patch-encoder `<select>` plus `patchSizeFor(encoder)` (UNI→256, Phikon→224), mirroring the backend. |
 | **`TridentForm`** | TRIDENT launch form (see page above). |
 | **`PantherForm`** | PANTHER training form (see page above). |
@@ -182,6 +226,11 @@ Run a fold model on new slides. The richest page.
 | **`JobLogViewer`** | Modal (portal) showing a job's `log_tail`, re-fetching every 2 s while the job is in flight; shows `error_message` if present. |
 | **`NotesThread`** | CRUD thread reused for both model notes and inference notes via a `target` discriminator (`{kind:'model'\|'inference', …}`). Add / edit / delete, optimistic local list updates. |
 | **`PrototypeLabels`** | A grid of `n_proto` text inputs; loads existing labels, saves on blur (`upsertPrototypeLabel`) with per-field saving/saved/error indicators. |
+| **`ZoomPanImage`** | Hand-rolled zoom/pan image viewer (wheel-to-zoom, drag-to-pan, ± / reset buttons). Optional `armed` + `onImageClick(fx,fy)` props turn it into a point picker: while `armed`, the viewport shows a crosshair and a non-drag click reports normalized `[0,1]` coords over the natural image (a pan of >4 px is not treated as a select). Optional `transform` + `onTransformChange` make it **controlled**: when `transform` is passed the component renders from the prop and every internal `commit` reports the clamped transform upward (still clamping locally) instead of owning state — the Compare page lifts one `Transform` and feeds it to the matching image in every panel to mirror pan/zoom. When `transform` is absent it is uncontrolled exactly as before. The pure `normalizedClick(rect, tf, imgW, imgH, x, y)` helper is exported and unit-tested, as is the controlled/uncontrolled behavior. |
+| **`SectionAPanel`** | The paper-style per-slide ROI panel. **Repick ROI** auto-picks a new window (`repickRoi`). **Select** arms a one-shot pick mode that passes `armed`/`onImageClick` to the assignment-map `ZoomPanImage`; a click calls `selectRoi(model.id, {slide_id, fx, fy})` and then auto-disarms — preview slide (`slide_id: null`, the default, `slideId` prop omitted) swaps `section` from the returned `ModelInfo`; a compare slide (`slideId` prop set) swaps just the `roi_*` fields from the returned `SlideVizArtifacts`. 409/422 render the same inline notice as repick. Optional `section` overrides the source (the Compare page feeds an arbitrary slide's render-slide manifest instead of `model.viz_artifacts?.section_a`); optional `imageTransform`/`onImageTransformChange` thread a controlled transform to the row-1 WSI + assignment-map images for cross-panel sync. |
+| **`SectionCPanel`** | The dataset-wide UMAP pair. Optional `onTissue` overrides the per-slide on-tissue colormap (Compare page) while the abstract scatter stays dataset-global (`section_c.scatter` / `umap_path`); optional `slideId` sets the caption. Absent overrides → identical to the model-detail behavior (incl. the legacy flat-`umap_path` fallback). |
+| **`ViolinPanel`** | Small per-slide Section-B violin (`resolveVizUrl` with a `mixture` placeholder fallback) captioned "Per-slide prototype similarity (violin)" — used by `CompareModelPanel` where the violin comes from a slide's render manifest. |
+| **`CompareModelPanel`** | One column of the Compare grid. On a chosen `slideId` it POSTs `renderSlide(model.id, slideId)` and runs a small state machine: `ready` → use the returned manifest; `rendering` → show a rendering banner + `JobStatusPoller` (`refTable="models"`, `refId=model.id`) and poll `getSlideViz` every 2 s until `ready`; a matching failed job or a render error → inline error + **Retry**. Renders (top→bottom) a model header chip, `SectionAPanel` (manifest-fed + optional synced transform), `ViolinPanel`, `SectionCPanel` (per-slide `onTissue`), and the global `SectionDPanel`. |
 
 ---
 

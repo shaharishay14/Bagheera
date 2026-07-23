@@ -1,8 +1,9 @@
 # Bagheera — Project Structure & Architecture
 
 > A web GUI for orchestrating the **TRIDENT** (feature extraction) and **PANTHER**
-> (prototype training) computational-pathology pipelines, plus a per-fold
-> visualization layer and a per-slide inference flow on top.
+> (prototype training) computational-pathology pipelines, plus a per-model
+> visualization layer, a side-by-side model-comparison view, and a per-slide inference
+> flow on top.
 >
 > **Audience:** anyone joining the project — to understand *what the system is*,
 > *how the pieces fit together*, and *what is and isn't built yet* before reading
@@ -17,7 +18,7 @@ Two upstream research pipelines from the Mahmood Lab do the heavy lifting:
 | Pipeline | Repo | Role |
 | --- | --- | --- |
 | **TRIDENT** | `github.com/mahmoodlab/TRIDENT` | Segments tissue, tiles whole-slide images (WSIs) into patches, and runs a patch encoder to produce per-slide feature files (`.h5`). |
-| **PANTHER** | `github.com/mahmoodlab/PANTHER` | Learns a set of *prototypes* (representative tissue patterns) over those features via an unsupervised mixture model, with K-fold cross-validation. |
+| **PANTHER** | `github.com/mahmoodlab/PANTHER` | Learns a set of *prototypes* (representative tissue patterns) over those features via an unsupervised mixture model. New runs train one model on all slides; legacy K-fold data is still supported. |
 
 Both are command-line tools. **Bagheera wraps them in a browser UI** so a pathology
 researcher can run the full pipeline, inspect the prototypes a model learned, label
@@ -39,31 +40,37 @@ Understanding these five nouns is enough to read the whole codebase:
 ```
 TRIDENT run ──produces──▶ features dir (.h5 files, one per slide)
                                 │
-   CSV manifest ──split──▶ K-fold Split (train/val/test CSVs per fold)
+   CSV manifest ──split──▶ Split  (single "100% train" fold, or legacy K-fold)
                                 │
                                 ▼
-        one PANTHER form submission = one  Model Group  (K folds)
-                                │
-                 ┌──────────────┼──────────────┐
-              Model k=0      Model k=1   …   Model k=(K-1)
-            (trained prototypes + per-fold visualizations)
+        one PANTHER submission = one standalone  Model  (trained on all slides)
                                 │
                                 ▼
-                    Inference (run a fold model on a NEW slide)
+                    Inference (run a Model on a NEW slide)
 ```
 
 - **TRIDENT run** — one feature-extraction job over a directory of WSIs.
-- **Split** — a K-fold partition of a dataset's slides, written to disk as
-  `train.csv` / `val.csv` / `test.csv` per fold. Every slide lands in `test` exactly
-  once across the K folds.
-- **Model Group** — the result of one PANTHER training submission. Owns **K Models**,
-  one per fold.
-- **Model** — a single trained PANTHER fold: its prototypes (`.pkl`), hyperparameters,
-  training status, and pre-rendered visualization artifacts (preview heatmaps, a
-  top-K representative-patch grid, a UMAP).
-- **Inference** — running one trained fold Model against one new WSI: TRIDENT extracts
+- **Split** — a partition of a dataset's slides written to disk as
+  `train.csv` / `val.csv` / `test.csv` per fold. New runs use a **single** fold that is
+  **100% train / 0% val / 0% test** (`create_single_split`, `k=1`, split name
+  `alltrain_seed_{seed}_{rand8}`). The legacy **K-fold** shape (every slide in `test`
+  exactly once across K folds) is still supported for existing data.
+- **Model** — a single trained PANTHER model: its prototypes (`.pkl`), hyperparameters,
+  training status, and pre-rendered visualization artifacts (Section A/B/C/D panels, a
+  UMAP, per-slide renders). A standalone model carries `run_kind="single"`,
+  `group_id == model.id`, `fold_index=0`, `fold_k=1`, and no `ModelGroup` row.
+- **Model Group** *(legacy, read-only)* — the result of one *old* K-fold PANTHER
+  submission; owns **K Models** (one per fold, `run_kind IS NULL`). No new groups are
+  created — existing ones stay viewable but are excluded from every "create new" flow.
+- **Inference** — running one trained Model against one new WSI: TRIDENT extracts
   that slide's features, then PANTHER-based renderers produce per-slide visualizations.
   Cached by a hash of the slide so the same (model, slide) pair is never recomputed.
+
+> **Why the shift?** PANTHER's unsupervised prototype fit has no held-out label to
+> validate against, so K-fold added complexity without a payoff for this UI. A new run
+> now trains **one** model on **all** slides; cross-model inspection moved to the
+> **Model Comparison** page (§3). The five nouns are unchanged — "Model Group" simply
+> became a legacy container.
 
 ---
 
@@ -79,27 +86,43 @@ TRIDENT run ──produces──▶ features dir (.h5 files, one per slide)
                             │
 ┌─ /training/panther ─────────────────────────────────────────────┐
 │ Point at the features dir → server resolves the dataset.        │
-│ Create a new K-fold split (from a CSV) OR pick an existing one. │
-│ Set PANTHER hyperparameters.                                    │
-│ POST /api/panther/runs  →  creates a Model Group + K Models,    │
-│ enqueues ONE async `panther_train` job, returns immediately,    │
-│ and the UI navigates to the group's detail page.                │
+│ Create a new single "100% train" split (from a CSV) OR pick an  │
+│ existing one. Set PANTHER hyperparameters.                      │
+│ POST /api/panther/single-runs  →  creates ONE standalone Model  │
+│ (no Model Group), enqueues ONE async `panther_train` job        │
+│ (`ref_table="models"`), returns immediately, and the UI         │
+│ navigates to the model's detail page (/models/:modelId).        │
 └─────────────────────────────────────────────────────────────────┘
                             │
 ┌─ background worker thread (polls the `jobs` table every 2 s) ───┐
-│ panther_train:  runs K PANTHER subprocesses sequentially.       │
-│                 On each fold's success → enqueues a             │
-│                 `post_train_viz` job for that fold.             │
-│ post_train_viz: renders 3 preview heatmaps + a top-K grid +     │
-│                 a UMAP for one fold Model.                       │
+│ panther_train:  branches on `job.ref_table`.                    │
+│                 "models" (new): trains one Model on the single  │
+│                   split → enqueues one `post_train_viz`.        │
+│                 "model_groups" (legacy): K subprocesses in      │
+│                   sequence → a `post_train_viz` per fold.       │
+│ post_train_viz: renders Section A (per-slide panel) + B (val    │
+│                 consistency, skipped for single runs) + C       │
+│                 (on-tissue UMAP + scatter) + D (prototype       │
+│                 dictionary) + per-slide violin for one Model.   │
+│ render_slide:   on-demand per-slide render for the Compare page │
+│                 (Section A + on-tissue + violin, memoized).     │
 │ inference:      runs TRIDENT on a new slide, then renders        │
 │                 heatmap / mixture / example patches / t-SNE.    │
 └─────────────────────────────────────────────────────────────────┘
                             │
-┌─ /models  +  /models/:groupId ──────────────────────────────────┐
-│ Browse groups (cards w/ status pills). Open a group to inspect  │
-│ each fold: previews, prototype labels, notes, parameters,       │
-│ shuffle previews, and a link into inference.                    │
+┌─ /models  (+ /models/:modelId, /models/group/:groupId) ─────────┐
+│ Browse standalone models (flat cards) + legacy K-fold groups    │
+│ (chip-tagged). Open a model to inspect its analysis panels,     │
+│ prototype labels, notes, parameters, ROI controls, and a link   │
+│ into inference. Legacy groups open the per-fold group view.     │
+└─────────────────────────────────────────────────────────────────┘
+                            │
+┌─ /training/panther/compare ─────────────────────────────────────┐
+│ Pick a dataset → a WSI (thumbnail grid) → add up to 4 non-      │
+│ legacy models. Each panel renders that slide's Section A +      │
+│ per-slide violin + Section C + Section D side by side (1–3 = a  │
+│ row, 4 = 2×2), with an optional Sync-zoom/pan toggle. Compute   │
+│ goes through the SAME single worker via `render_slide` jobs.    │
 └─────────────────────────────────────────────────────────────────┘
                             │
 ┌─ /models/:modelId/inference ────────────────────────────────────┐
@@ -109,9 +132,10 @@ TRIDENT run ──produces──▶ features dir (.h5 files, one per slide)
 ```
 
 **Why two execution styles?** The *initial* TRIDENT dataset build is synchronous (one
-user → one run, blocking is acceptable and simplest). PANTHER training and inference are
-*async* through the worker thread because they run K subprocesses / heavy GPU work and
-must not block the request.
+user → one run, blocking is acceptable and simplest). PANTHER training, per-slide
+rendering, and inference are *async* through the worker thread because they run heavy GPU
+subprocesses (legacy K-fold training runs K of them sequentially) and must not block the
+request.
 
 ---
 
@@ -124,7 +148,11 @@ Bagheera/
 ├── docs/                         ← these documents
 │   ├── structure.md
 │   ├── backend.md
-│   └── frontend.md
+│   ├── frontend.md
+│   ├── database.md
+│   ├── queue-design.md
+│   ├── tests.md
+│   └── docker.md
 │
 ├── backend/                      FastAPI service
 │   ├── README.md                 Backend-specific ops guide (env, gotchas)
@@ -141,18 +169,25 @@ Bagheera/
 │   │   ├── routes/               One router per resource (see backend.md §API)
 │   │   │   ├── fs.py  trident.py  runs.py  splits.py  panther.py
 │   │   │   ├── models.py  labels.py  notes.py  inference.py  jobs.py  viz.py
+│   │   │   ├── datasets.py        Model Comparison dataset/slide/model lookups
+│   │   │   ├── thumbnails.py      WSI slide-picker thumbnails
+│   │   │   └── queue.py           Queue listing / reorder
 │   │   └── services/             Business logic (the interesting part)
 │   │       ├── fs.py              Sandboxed filesystem access
 │   │       ├── runner.py          TRIDENT subprocess (sync)
-│   │       ├── splitter.py        K-fold CV split generation
+│   │       ├── splitter.py        Split generation (single "100% train" + legacy K-fold)
 │   │       ├── panther_runner.py  PANTHER subprocess + path helpers
 │   │       ├── worker.py          Background job worker thread + job log files
 │   │       ├── job_handlers.py    Stub handlers (overwritten by real ones)
-│   │       ├── panther_train.py   Real `panther_train` job handler
+│   │       ├── panther_train.py   Real `panther_train` handler (single + legacy K-fold)
 │   │       ├── post_train_viz.py  Real `post_train_viz` job handler
+│   │       ├── render_slide.py    Real `render_slide` handler (Compare per-slide render)
 │   │       ├── inference.py        Inference helpers (hash, cache, TRIDENT cmd)
 │   │       ├── inference_job.py    Real `inference` job handler
-│   │       ├── visualization.py    The 6 PANTHER renderers (heatmap/umap/…)
+│   │       ├── visualization.py    The PANTHER renderers (Section A–D, heatmap/umap/…)
+│   │       ├── assignment_cache.py In-memory per-(model,slide) encoder-pass memoizer
+│   │       ├── thumbnails.py       TRIDENT/openslide slide-picker thumbnails
+│   │       ├── model_delete.py     Cascading group/model delete
 │   │       └── preview.py          Deterministic preview-slide picking
 │   └── scripts/
 │       ├── run_trident.sh         Thin wrapper → TRIDENT's run_batch_of_slides.py
@@ -170,13 +205,16 @@ Bagheera/
         ├── lib/api.ts          Typed API client (the FE↔BE contract)
         ├── pages/              One component per route
         │   ├── TridentTrainingPage.tsx   PantherTrainingPage.tsx
-        │   ├── ModelsBrowserPage.tsx      GroupDetailPage.tsx
+        │   ├── PantherComparePage.tsx     Model Comparison (dataset→slide→models)
+        │   ├── ModelsBrowserPage.tsx      ModelDetailPage.tsx   GroupDetailPage.tsx
         │   └── InferencePage.tsx
         └── components/         Reusable UI
-            ├── DirectoryBrowser.tsx   EncoderSelect.tsx
+            ├── DirectoryBrowser.tsx   EncoderSelect.tsx   ZoomPanImage.tsx
             ├── TridentForm.tsx        PantherForm.tsx
             ├── JobStatusPoller.tsx    JobLogViewer.tsx
             ├── NotesThread.tsx        PrototypeLabels.tsx
+            ├── SectionAPanel.tsx      SectionBPanel.tsx   SectionCPanel.tsx
+            ├── SectionDPanel.tsx      ViolinPanel.tsx     CompareModelPanel.tsx
 ```
 
 ---
@@ -189,16 +227,21 @@ schema change you delete `bagheera.db` and let it recreate.
 | Table | One row per… | Key relationships |
 | --- | --- | --- |
 | `trident_runs` | TRIDENT feature-extraction run | — |
-| `splits` | K-fold split on disk (unique `split_name`) | — |
-| `model_groups` | one PANTHER form submission | → `splits`, → `trident_runs` (nullable) |
-| `models` | one trained fold | → `model_groups` (via `group_id`), → `splits`, → `trident_runs`; unique `(group_id, fold_index)` |
-| `panther_runs` | one fold's subprocess attempt (exec log) | → `models` |
+| `splits` | split on disk (unique `split_name`); single "100% train" (`k=1`) or legacy K-fold | — |
+| `model_groups` | *(legacy only)* one old K-fold submission | → `splits`, → `trident_runs` (nullable). **No new rows** — single runs skip this table. |
+| `models` | one trained model (standalone `run_kind="single"`, or a legacy fold) | → `model_groups` (via `group_id`; == `model.id` for single runs), → `splits`, → `trident_runs`; unique `(group_id, fold_index)` |
+| `panther_runs` | one training subprocess attempt (exec log) | → `models` |
 | `prototype_labels` | one label on one prototype | → `models`; unique `(model_id, prototype_index)` |
 | `model_notes` | a free-text note on a model | → `models` |
 | `inference_batches` | a group of inferences submitted together | → `models` |
-| `inferences` | one (fold model, WSI) run | → `models`, → `inference_batches`; unique `(model_id, wsi_hash)` |
+| `inferences` | one (model, WSI) run | → `models`, → `inference_batches`; unique `(model_id, wsi_hash)` |
 | `inference_notes` | a free-text note on an inference | → `inferences` |
-| `jobs` | one async unit of work | polymorphic `(ref_table, ref_id)` pointer |
+| `jobs` | one async unit of work | polymorphic `(ref_table, ref_id)`; optional `params` JSON (carries `slide_id` for `render_slide`) |
+
+**Additive schema notes (no wipe):** `models.run_kind` (`"single"` for standalone runs,
+`NULL` for legacy folds) and `jobs.params` (per-job JSON, e.g. `{"slide_id": ...}`) were
+both added via `ALTER TABLE` guards in `init_db()`. New single runs create a `Model` +
+`Split` but **no `model_groups` row**.
 
 ```
 trident_runs ──┐
@@ -221,7 +264,8 @@ See [backend.md](./backend.md) for every column.
 A deliberately simple design that a future PR is expected to replace with a real queue:
 
 - `jobs` is a SQLite table. Each row has a `job_type`
-  (`panther_train` | `post_train_viz` | `inference`) and a polymorphic
+  (`panther_train` | `post_train_viz` | `render_slide` | `inference`), an optional
+  `params` JSON blob (e.g. `{"slide_id": ...}` for `render_slide`), and a polymorphic
   `(ref_table, ref_id)` pointer to the row it operates on.
 - **One daemon thread** (`services/worker.py`) polls every 2 s, claims the oldest
   `queued` job, marks it `running`, dispatches to the registered handler, then marks it
@@ -254,10 +298,11 @@ All configuration is environment variables (see `backend/.env.example`):
 ```
 ${VIZ_CACHE_ROOT}/
 ├── job_logs/{job_id}.log              one log per async job
-└── {model_id}/                        post-training viz for a fold
-    ├── heatmap_{slide}.png
-    ├── topk_grid.png
-    └── umap.png
+├── slide_thumbs/{key}.jpg             generated WSI-picker thumbnails (cached)
+└── {model_id}/                        post-training viz for a model
+    ├── heatmap_{slide}.png  umap.png
+    ├── section_a/ … section_b/ … section_c/ … section_d/   Analysis-page panels
+    └── compare/{slide_id}/            on-demand per-slide render + manifest.json
 ${INFERENCE_ROOT}/
 └── {model_id}/{inference_id}/         per-inference artifacts
     ├── custom_list.csv
@@ -294,13 +339,23 @@ Bagheera has **no authentication**; its only trust boundary is path sandboxing:
 **Built and wired end-to-end:**
 
 - TRIDENT sync run + run listing/resolution.
-- K-fold split creation/listing.
-- PANTHER K-fold async training (Model Group + K Models + job).
-- Background worker with three real handlers (`panther_train`, `post_train_viz`,
-  `inference`) and per-job log files.
-- Models browser, group detail (favorites, prototype labels, notes, parameter panels,
-  shuffle previews), and the full inference page (single + batch, caching, rerun).
-- The six PANTHER renderers and per-inference visualizers.
+- Split creation/listing: **single "100% train"** (`kind="single"`, the default for new
+  runs) and legacy **K-fold**.
+- PANTHER async training: **single standalone Model** (`POST /api/panther/single-runs`,
+  no Model Group) for new runs; legacy K-fold (`POST /api/panther/runs`) still works.
+- Background worker with four real handlers (`panther_train` — branches single vs.
+  legacy K-fold —, `post_train_viz`, `render_slide`, `inference`) and per-job log files.
+- Models browser (flat standalone models + chip-tagged legacy groups), a standalone
+  `ModelDetailPage` and the legacy `GroupDetailPage` (favorites, prototype labels, notes,
+  parameter panels, shuffle previews, Section A ROI **Repick** + manual **Select**), and
+  the full inference page (single + batch, caching, rerun).
+- **Model Comparison page** (`/training/panther/compare`): dataset → WSI (thumbnail
+  grid) → up to 4 non-legacy models rendered side by side for one slide, with an optional
+  synced zoom/pan. Compute reuses the single worker via `render_slide` jobs; per-slide
+  encoder passes are memoized (`services/assignment_cache.py`).
+- The PANTHER renderers (Section A–D + per-slide violin) and per-inference visualizers.
+- Slide-picker thumbnails (`GET /api/slide-thumbnail`; TRIDENT thumbnail if present, else
+  generated + cached).
 - An idempotent demo seeder covering the UI's status matrix.
 
 **Explicitly deferred / not built (candidate next work):**
@@ -311,9 +366,9 @@ Bagheera has **no authentication**; its only trust boundary is path sandboxing:
 - **WSI upload** through the browser (paths must already exist on the server).
 - **MPP override** for slides without embedded resolution (PNG/JPEG inputs).
 - "**Test on training-set slides**" mode on the inference page.
-- **Cross-group** model comparison views.
 - **Export** of labels / notes / inferences.
 - **Authentication** / access control.
+- **Reviving K-fold** as a first-class "create new" flow (currently legacy/read-only).
 
 > ⚠️ **Validation caveat.** The visualization (`services/visualization.py`) and inference
 > (`services/inference.py`) modules each open with a numbered list of assumptions about
@@ -322,3 +377,11 @@ Bagheera has **no authentication**; its only trust boundary is path sandboxing:
 > a real GPU**. The code is written to fail gracefully (clean job-log tracebacks,
 > `status='failed'`), but each assumption should be verified on the first real run. See
 > the module docstrings and [backend.md §Assumptions](./backend.md).
+>
+> ⚠️ **F3 thumbnail caveat (unverified).** The exact TRIDENT thumbnail subpath/extension
+> (`{job_dir}/thumbnails/{slide}.{jpg|jpeg|png}`) that `services/thumbnails.py` probes was
+> **not confirmed against a real dataset**. `GET /api/datasets/{name}/slides` returns a
+> `thumbnails_found` diagnostic to expose a mismatch on the first real run; if it comes
+> back 0 while thumbnails clearly exist on disk, update `_TRIDENT_THUMB_EXTS` /
+> `find_trident_thumbnail`. Thumbnail generation falls back to openslide, so the picker
+> still works either way.

@@ -117,6 +117,7 @@ from typing import Iterable
 
 from app.config import settings
 from app.db.models import Model, TridentRun
+from app.services import assignment_cache
 
 logger = logging.getLogger(__name__)
 
@@ -380,6 +381,30 @@ def _compute_assignments(encoder, feats):
     return cluster_labels, qq, mixture_probs
 
 
+def get_assignments(model: Model, slide_stem: str, h5_path: Path, *, encoder=None):
+    """Return `(coords, cluster_labels, qq, mixture_probs, patch_size)` for one slide.
+
+    Memoized per `(model.id, slide_stem)` via `assignment_cache`: the heavy
+    encoder forward pass (`_compute_assignments`) is skipped on a cache hit, so
+    several per-slide renderers for the SAME (model, slide) — the assignment
+    heatmap, mixture plot, example patches, per-slide t-SNE, ROI, and the
+    Compare panels — share one encoder run.
+
+    On a miss this loads the encoder (reuses `_load_panther_encoder(model)`
+    unless `encoder` is supplied), loads the h5, runs the encoder, stores the
+    record, and returns it. The cache key is model-scoped: assignments are
+    never shared across models (each model has its own prototypes).
+    """
+
+    def _compute():
+        enc = encoder if encoder is not None else _load_panther_encoder(model)
+        coords, feats, patch_size = _load_h5(h5_path)
+        cluster_labels, qq, mixture_probs = _compute_assignments(enc, feats)
+        return coords, cluster_labels, qq, mixture_probs, patch_size
+
+    return assignment_cache.get_or_compute(model.id, slide_stem, _compute)
+
+
 # ---------------------------------------------------------------------------
 # §5c renderers
 # ---------------------------------------------------------------------------
@@ -402,9 +427,9 @@ def render_assignment_heatmap(
     (SECTION_A_DOWNSAMPLE); the per-fold previews keep the default 128.
     `out_path` lets a caller redirect the file (e.g. into the section_a/ dir).
     """
-    encoder = _load_panther_encoder(model)
-    coords, feats, patch_size = _load_h5(h5_path)
-    cluster_labels, _qq, _probs = _compute_assignments(encoder, feats)
+    coords, cluster_labels, _qq, _probs, patch_size = get_assignments(
+        model, Path(h5_path).stem, h5_path
+    )
     if out_path is None:
         out_path = _viz_dir(model) / f"heatmap_{Path(h5_path).stem}.png"
     return render_assignment_heatmap_from_assignments(
@@ -497,9 +522,9 @@ def render_mixture_plot(model: Model, h5_path: Path) -> Path:
     _ensure_panther_on_syspath()
     from visualization.prototype_visualization_utils import get_mixture_plot  # type: ignore[import-not-found]
 
-    encoder = _load_panther_encoder(model)
-    _coords, feats, _patch_size = _load_h5(h5_path)
-    _labels, _qq, mixture_probs = _compute_assignments(encoder, feats)
+    _coords, _labels, _qq, mixture_probs, _patch_size = get_assignments(
+        model, Path(h5_path).stem, h5_path
+    )
 
     fig = get_mixture_plot(mixture_probs)
     out_path = _viz_dir(model) / f"mixture_{Path(h5_path).stem}.png"
@@ -521,9 +546,9 @@ def render_example_patches(
 
     Returns the directory path. Caller can list it to build an index.
     """
-    encoder = _load_panther_encoder(model)
-    coords, feats, patch_size = _load_h5(h5_path)
-    _labels, qq, _probs = _compute_assignments(encoder, feats)
+    coords, _labels, qq, _probs, patch_size = get_assignments(
+        model, Path(h5_path).stem, h5_path
+    )
 
     wsi = _open_wsi(wsi_path)
     out_dir = _viz_dir(model, subdir=f"example_patches_{Path(h5_path).stem}")
@@ -560,9 +585,13 @@ def render_tsne_per_slide(model: Model, h5_path: Path, wsi_path: Path) -> Path:
     """
     _ = wsi_path  # signature-only
 
-    encoder = _load_panther_encoder(model)
-    _coords, feats, _patch_size = _load_h5(h5_path)
-    labels, _qq, _probs = _compute_assignments(encoder, feats)
+    # Labels come from the memoized encoder pass; the feature tensor itself is
+    # cheap to reload from the h5 (t-SNE fits on the raw features, which the
+    # assignment cache doesn't retain).
+    _coords, labels, _qq, _probs, _patch_size = get_assignments(
+        model, Path(h5_path).stem, h5_path
+    )
+    _coords2, feats, _patch_size2 = _load_h5(h5_path)
 
     import matplotlib.pyplot as plt  # noqa: WPS433
     from sklearn.manifold import TSNE  # noqa: WPS433
@@ -1127,16 +1156,211 @@ def section_a_dir(model: Model) -> Path:
     return _viz_dir(model, subdir="section_a")
 
 
+def compare_slide_dir(model: Model, slide_id: str) -> Path:
+    """The VIZ_CACHE_ROOT/{model_id}/compare/{slide_id}/ directory.
+
+    Where the Model Comparison page's on-demand per-slide renders land (Section A
+    panel + Section C on-tissue map + per-slide violin + a manifest.json). Unlike
+    `section_a_dir`, this does NOT create the directory — a GET that merely probes
+    for a manifest shouldn't leave empty dirs behind. The renderers mkdir it.
+    """
+    return settings.viz_cache_root / model.id / "compare" / slide_id
+
+
+def render_section_a_for_slide(
+    model: Model,
+    slide_id: str,
+    h5_path: Path,
+    wsi_path: Path,
+    *,
+    out_dir: Path | None = None,
+    log=None,
+) -> dict:
+    """Render the Section A per-slide panel for an ARBITRARY slide into `out_dir`.
+
+    Shared by the train-time preview path (`post_train_viz`, `out_dir` defaults
+    to `section_a_dir(model)`) and the on-demand Compare per-slide path
+    (`out_dir=compare/{slide_id}/`). One encoder pass (via `get_assignments`,
+    which memoizes per (model, slide)) feeds the thumbnail, hi-res assignment
+    map, π_c bars, and index-0 ROI; each render is wrapped in its own try/except
+    so partial success still publishes. The slide's coords/labels are cached to a
+    .npz in `out_dir` so a later manual-ROI repick re-tiles without the encoder.
+
+    `log` is an optional object with a `.write(str)` method (the JobLog) for
+    progress lines. Returns the `section_a` dict.
+    """
+    dest = Path(out_dir) if out_dir is not None else section_a_dir(model)
+    dest.mkdir(parents=True, exist_ok=True)
+
+    def _say(msg: str) -> None:
+        if log is not None:
+            log.write(msg)
+
+    # One encoder pass, memoized per (model, slide) — reused by any later
+    # Section C / violin / ROI render for the same slide in this process.
+    coords, cluster_labels, _qq, mixture_probs, patch_size = get_assignments(
+        model, slide_id, h5_path
+    )
+
+    section: dict = {"slide_id": slide_id, "roi_index": 0}
+
+    try:
+        out = render_wsi_thumbnail(
+            model, wsi_path, coords=coords, patch_size=patch_size, out_dir=dest
+        )
+        section["thumbnail"] = str(out)
+        _say(f"    thumbnail: {out}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        _say(f"    FAILED thumbnail: {exc}\n{traceback.format_exc()}")
+
+    try:
+        out = render_assignment_heatmap_from_assignments(
+            model,
+            coords,
+            cluster_labels,
+            patch_size,
+            wsi_path,
+            downsample_target=SECTION_A_DOWNSAMPLE,
+            crop_to_tissue=True,
+            patch_borders=True,
+            out_path=dest / f"assignment_map_{slide_id}.png",
+        )
+        section["assignment_map"] = str(out)
+        _say(f"    assignment_map: {out}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        _say(f"    FAILED assignment_map: {exc}\n{traceback.format_exc()}")
+
+    try:
+        out = render_pi_c_barplot(model, mixture_probs, out_dir=dest)
+        section["pi_c"] = str(out)
+        _say(f"    pi_c: {out}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        _say(f"    FAILED pi_c: {exc}\n{traceback.format_exc()}")
+
+    try:
+        raw, colored, bbox, used_idx, n_windows = render_roi_from_assignments(
+            model, coords, cluster_labels, patch_size, wsi_path, roi_index=0, out_dir=dest
+        )
+        section["roi_raw"] = str(raw)
+        section["roi_colored"] = str(colored)
+        section["roi_bbox"] = bbox
+        section["roi_index"] = used_idx
+        _say(f"    roi: index {used_idx}/{n_windows} bbox={bbox}")
+    except Exception as exc:  # noqa: BLE001
+        import traceback
+
+        _say(f"    FAILED roi: {exc}\n{traceback.format_exc()}")
+
+    try:
+        save_section_a_cache(model, slide_id, coords, cluster_labels, patch_size, out_dir=dest)
+    except Exception as exc:  # noqa: BLE001
+        _say(f"    WARNING: failed to write ROI repick cache: {exc}")
+
+    return section
+
+
+def render_slide_violin(model: Model, feats, cluster_labels, *, out_dir: Path | None = None) -> dict:
+    """Per-slide prototype-consistency violin (Analysis figure F4).
+
+    For ONE slide: for each prototype c, take the patches assigned to c (by
+    `cluster_labels`), measure each such patch feature's COSINE SIMILARITY to
+    prototype c's trained center, and draw a violin per prototype. Colored by
+    `get_default_cmap(model.n_proto)` so the violins match the assignment map /
+    π_c bars. Distinct from the val-based Section B (`render_validation_consistency`),
+    which spans many held-out slides; this is a single-slide diagnostic.
+
+    Output: `{out_dir}/violin.png` (out_dir defaults to
+    `viz_cache/{model_id}/section_b_violin/`). Returns
+    `{"violin": <abs path>, "counts": [n_c for c in range(n_proto)]}`.
+    """
+    _ensure_panther_on_syspath()
+    import numpy as np  # noqa: WPS433
+    import matplotlib.pyplot as plt  # noqa: WPS433
+
+    from visualization.prototype_visualization_utils import get_default_cmap  # type: ignore[import-not-found]
+
+    n_proto = model.n_proto
+
+    feats_np = feats.detach().cpu().numpy() if hasattr(feats, "detach") else np.asarray(feats)
+    feats_np = np.asarray(feats_np, dtype=np.float32)
+    labels = np.asarray(cluster_labels).astype(int)
+
+    centers = _load_prototype_centers(model)  # (n_proto, dim)
+    centers_norm = centers / (np.linalg.norm(centers, axis=1, keepdims=True) + 1e-8)
+    feats_norm = feats_np / (np.linalg.norm(feats_np, axis=1, keepdims=True) + 1e-8)
+
+    # Cosine similarity of each patch to the center of the prototype it was
+    # assigned to. Clamp labels defensively in case of an off-by-one shape.
+    safe_labels = np.clip(labels, 0, n_proto - 1)
+    sims = np.einsum("ij,ij->i", feats_norm, centers_norm[safe_labels])
+
+    per_proto: list[list[float]] = [[] for _ in range(n_proto)]
+    for c in range(n_proto):
+        m = safe_labels == c
+        if m.any():
+            per_proto[c] = sims[m].astype(float).tolist()
+    counts = [len(per_proto[c]) for c in range(n_proto)]
+
+    cmap = get_default_cmap(n_proto)
+    proto_colors = [tuple(v / 255 for v in cmap[i][:3]) for i in range(n_proto)]
+    xticks = list(range(1, n_proto + 1))
+    xlabels = [f"C{i + 1}" for i in range(n_proto)]
+    rot = 45 if n_proto > 12 else 0
+    fig_w = max(6.0, n_proto * 0.6)
+
+    positions = [c + 1 for c in range(n_proto) if counts[c] > 0]
+    datasets = [per_proto[c] for c in range(n_proto) if counts[c] > 0]
+
+    fig, ax = plt.subplots(figsize=(fig_w, 4.5), dpi=120)
+    if datasets:
+        parts = ax.violinplot(datasets, positions=positions, showmedians=True, widths=0.8)
+        for body, pos in zip(parts["bodies"], positions):
+            body.set_facecolor(proto_colors[pos - 1])
+            body.set_edgecolor("#333333")
+            body.set_alpha(0.85)
+        for key in ("cbars", "cmins", "cmaxes", "cmedians"):
+            if key in parts:
+                parts[key].set_edgecolor("#333333")
+                parts[key].set_linewidth(1.0)
+    ax.set_xticks(xticks)
+    ax.set_xticklabels(xlabels, rotation=rot, fontsize=8)
+    ax.set_ylabel("cosine sim to prototype center")
+    ax.set_title("Patch → prototype consistency (this slide)")
+    ax.set_ylim(-0.05, 1.08)
+    for c in range(n_proto):
+        ax.text(c + 1, 1.03, f"n={counts[c]}", ha="center", va="bottom",
+                fontsize=6, rotation=90, color="#555555")
+    ax.grid(axis="y", alpha=0.2)
+    fig.tight_layout()
+
+    dest = Path(out_dir) if out_dir is not None else _viz_dir(model, "section_b_violin")
+    dest.mkdir(parents=True, exist_ok=True)
+    violin_path = dest / "violin.png"
+    fig.savefig(str(violin_path))
+    _close_fig(fig)
+
+    return {"violin": str(violin_path), "counts": counts}
+
+
 def render_wsi_thumbnail(
     model: Model,
     wsi_path: Path,
     *,
     coords=None,
     patch_size: int | None = None,
+    out_dir: Path | None = None,
 ) -> Path:
     """Downscaled H&E thumbnail of the whole slide, with a physical scale bar.
 
     Per-slide. Output: viz_cache/{model_id}/section_a/thumbnail_{slide_stem}.png
+    (or `{out_dir}/thumbnail_{slide_stem}.png` when `out_dir` is supplied — the
+    Compare page renders arbitrary slides into `compare/{slide_id}/`).
 
     Microns-per-pixel is read from openslide's MPP_X property. If it's missing
     the thumbnail is still rendered, just without the scale bar (we never fail
@@ -1171,15 +1395,19 @@ def render_wsi_thumbnail(
     finally:
         _close_wsi(wsi)
 
-    out_path = section_a_dir(model) / f"thumbnail_{Path(wsi_path).stem}.png"
+    dest = Path(out_dir) if out_dir is not None else section_a_dir(model)
+    dest.mkdir(parents=True, exist_ok=True)
+    out_path = dest / f"thumbnail_{Path(wsi_path).stem}.png"
     thumb.save(str(out_path), format="PNG", optimize=True)
     return out_path
 
 
-def render_pi_c_barplot(model: Model, mixture_probs) -> Path:
+def render_pi_c_barplot(model: Model, mixture_probs, *, out_dir: Path | None = None) -> Path:
     """Bar chart of the GMM mixture proportions π_c for one slide.
 
-    Per-slide. Output: viz_cache/{model_id}/section_a/pi_c.png
+    Per-slide. Output: viz_cache/{model_id}/section_a/pi_c.png (or
+    `{out_dir}/pi_c.png` when `out_dir` is supplied — the Compare page renders
+    arbitrary slides into `compare/{slide_id}/`).
 
     One bar per prototype, each bar colored with that prototype's color from
     PANTHER's `get_default_cmap(n_proto)` — the same cmap the assignment map
@@ -1210,7 +1438,9 @@ def render_pi_c_barplot(model: Model, mixture_probs) -> Path:
     for spine in ("top", "right"):
         ax.spines[spine].set_visible(False)
 
-    out_path = section_a_dir(model) / "pi_c.png"
+    dest = Path(out_dir) if out_dir is not None else section_a_dir(model)
+    dest.mkdir(parents=True, exist_ok=True)
+    out_path = dest / "pi_c.png"
     fig.savefig(str(out_path), bbox_inches="tight", dpi=150)
     _close_fig(fig)
     return out_path
@@ -1282,6 +1512,7 @@ def render_roi_from_assignments(
     patch_size: int,
     wsi_path: Path,
     roi_index: int = 0,
+    out_dir: Path | None = None,
 ):
     """Render the raw + prototype-colored ROI for the `roi_index`-th window.
 
@@ -1289,8 +1520,120 @@ def render_roi_from_assignments(
     the repick endpoint (with assignments loaded from the .npz cache — no
     encoder run). Deterministic given `(model, slide, roi_index)`.
 
+    Output dir defaults to `section_a_dir(model)`; the Compare page passes
+    `out_dir=compare/{slide_id}/` to render an arbitrary slide's ROI.
+
     Returns `(roi_raw_path, roi_colored_path, [x, y, w, h], used_index, num_windows)`.
     `used_index` is `roi_index % num_windows`, so the caller can wrap around.
+    """
+    windows = _select_roi_windows(coords, cluster_labels, patch_size, grid=ROI_GRID)
+    if not windows:
+        raise VisualizationError("No tissue patches available to pick an ROI from.")
+
+    n = len(windows)
+    idx = int(roi_index) % n
+    return _render_roi_window(
+        model, coords, cluster_labels, patch_size, wsi_path, windows[idx], idx, n, out_dir
+    )
+
+
+def render_roi_at_point(
+    model: Model,
+    coords,
+    cluster_labels,
+    patch_size: int,
+    wsi_path: Path,
+    fx: float,
+    fy: float,
+    *,
+    out_dir: Path | None = None,
+):
+    """Render the ROI window containing a user click on the assignment map.
+
+    `fx, fy` are floats in [0, 1] normalized over the NATURAL assignment-map
+    image, which spans the coords' spatial bounding box. They map to a level-0
+    target point:
+
+        xmin, ymin = coords.min(axis=0)
+        xmax, ymax = coords.max(axis=0) + patch_size   # cover the last patch
+        tx = xmin + fx * (xmax - xmin)
+        ty = ymin + fy * (ymax - ymin)
+
+    We rank the same non-overlapping windows as `render_roi_from_assignments`
+    (`_select_roi_windows`), then pick the window whose
+    `[x0, x0+span) × [y0, y0+span)` CONTAINS `(tx, ty)`. If the click landed on a
+    gap tile that no ranked (occupied) window covers, we fall back to the window
+    whose center is NEAREST to `(tx, ty)`. `used_index` is that window's rank in
+    the ranked list, so the UI can display "ROI n of N".
+
+    Synchronous (uses the passed-in cached coords/labels — no encoder run).
+    Raises `VisualizationError` if there are no windows at all. Returns the same
+    shape as `render_roi_from_assignments`:
+    `(roi_raw_path, roi_colored_path, [x, y, w, h], used_index, num_windows)`.
+    """
+    import numpy as np  # noqa: WPS433
+
+    windows = _select_roi_windows(coords, cluster_labels, patch_size, grid=ROI_GRID)
+    if not windows:
+        raise VisualizationError("No tissue patches available to pick an ROI from.")
+
+    fxc = min(1.0, max(0.0, float(fx)))
+    fyc = min(1.0, max(0.0, float(fy)))
+
+    c = np.asarray(coords)
+    xmin = float(c[:, 0].min())
+    ymin = float(c[:, 1].min())
+    xmax = float(c[:, 0].max()) + float(patch_size)
+    ymax = float(c[:, 1].max()) + float(patch_size)
+    tx = xmin + fxc * (xmax - xmin)
+    ty = ymin + fyc * (ymax - ymin)
+
+    # Prefer the window that CONTAINS the click.
+    chosen = None
+    for i, (x0, y0, w, h, _idxs) in enumerate(windows):
+        if x0 <= tx < x0 + w and y0 <= ty < y0 + h:
+            chosen = i
+            break
+
+    # Click landed on a gap tile (no occupied window covers it): fall back to the
+    # window whose center is nearest to the click.
+    if chosen is None:
+        best_d = None
+        for i, (x0, y0, w, h, _idxs) in enumerate(windows):
+            cx = x0 + w / 2.0
+            cy = y0 + h / 2.0
+            d = (cx - tx) ** 2 + (cy - ty) ** 2
+            if best_d is None or d < best_d:
+                best_d = d
+                chosen = i
+
+    n = len(windows)
+    return _render_roi_window(
+        model, coords, cluster_labels, patch_size, wsi_path, windows[chosen], chosen, n, out_dir
+    )
+
+
+def _render_roi_window(
+    model: Model,
+    coords,
+    cluster_labels,
+    patch_size: int,
+    wsi_path: Path,
+    window,
+    idx: int,
+    n: int,
+    out_dir: Path | None = None,
+):
+    """Render the raw + prototype-colored ROI for one chosen window.
+
+    `window` is a single `(x0, y0, w, h, member_indices)` tuple from
+    `_select_roi_windows`; `idx`/`n` are its rank / total (echoed back so the UI
+    can show "ROI idx of n"). Shared by `render_roi_from_assignments` (index
+    pick, wrap via modulo) and `render_roi_at_point` (click pick). `out_dir`
+    defaults to `section_a_dir(model)`; the Compare page passes
+    `compare/{slide_id}/`.
+
+    Returns `(roi_raw_path, roi_colored_path, [x, y, w, h], idx, n)`.
     """
     _ensure_panther_on_syspath()
     import numpy as np  # noqa: WPS433
@@ -1298,13 +1641,7 @@ def render_roi_from_assignments(
 
     from visualization.prototype_visualization_utils import get_default_cmap  # type: ignore[import-not-found]
 
-    windows = _select_roi_windows(coords, cluster_labels, patch_size, grid=ROI_GRID)
-    if not windows:
-        raise VisualizationError("No tissue patches available to pick an ROI from.")
-
-    n = len(windows)
-    idx = int(roi_index) % n
-    x0, y0, w, h, member_idxs = windows[idx]
+    x0, y0, w, h, member_idxs = window
 
     coords = np.asarray(coords)
     labels = np.asarray(cluster_labels)
@@ -1312,7 +1649,8 @@ def render_roi_from_assignments(
     # Same true pitch the windows were tiled on, so every cell maps to a patch.
     cell = _coord_pitch(coords, patch_size)
     stem = Path(wsi_path).stem
-    out_dir = section_a_dir(model)
+    out_dir = Path(out_dir) if out_dir is not None else section_a_dir(model)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     wsi = _open_wsi(wsi_path)
     try:
@@ -1373,9 +1711,9 @@ def render_roi(
     Convenience wrapper around `render_roi_from_assignments` that runs the
     encoder. Returns `(roi_raw_path, roi_colored_path, [x, y, w, h])`.
     """
-    encoder = _load_panther_encoder(model)
-    coords, feats, patch_size = _load_h5(h5_path)
-    cluster_labels, _qq, _probs = _compute_assignments(encoder, feats)
+    coords, cluster_labels, _qq, _probs, patch_size = get_assignments(
+        model, Path(h5_path).stem, h5_path
+    )
     raw, colored, bbox, _idx, _n = render_roi_from_assignments(
         model, coords, cluster_labels, patch_size, wsi_path, roi_index=roi_index
     )
@@ -1387,13 +1725,23 @@ def render_roi(
 # ---------------------------------------------------------------------------
 
 
-def save_section_a_cache(model: Model, slide_id: str, coords, cluster_labels, patch_size: int) -> None:
-    """Persist the Section A slide's coords/labels so ROI repick can re-tile
-    without re-running the encoder. Writes a small .npz + .json sidecar under
-    section_a/."""
+def save_section_a_cache(
+    model: Model,
+    slide_id: str,
+    coords,
+    cluster_labels,
+    patch_size: int,
+    *,
+    out_dir: Path | None = None,
+) -> None:
+    """Persist a slide's coords/labels so ROI repick can re-tile without
+    re-running the encoder. Writes a small .npz + .json sidecar into `out_dir`
+    (defaults to `section_a/` for the train-time preview slide; the Compare page
+    passes `compare/{slide_id}/` so an arbitrary slide's ROI can be re-tiled)."""
     import numpy as np  # noqa: WPS433
 
-    d = section_a_dir(model)
+    d = Path(out_dir) if out_dir is not None else section_a_dir(model)
+    d.mkdir(parents=True, exist_ok=True)
     np.savez(
         str(d / "roi_cache.npz"),
         coords=np.asarray(coords),
@@ -1404,15 +1752,17 @@ def save_section_a_cache(model: Model, slide_id: str, coords, cluster_labels, pa
     )
 
 
-def load_section_a_cache(model: Model):
-    """Load the cached Section A assignments.
+def load_section_a_cache(model: Model, *, out_dir: Path | None = None):
+    """Load the cached per-slide assignments.
 
     Returns `(slide_id, coords, cluster_labels, patch_size)`. Raises
     VisualizationError if the cache is missing (caller maps that to a 409).
+    Reads from `out_dir` (defaults to `section_a/` — the train-time preview
+    slide; the Compare page passes `compare/{slide_id}/`).
     """
     import numpy as np  # noqa: WPS433
 
-    d = section_a_dir(model)
+    d = Path(out_dir) if out_dir is not None else section_a_dir(model)
     npz_path = d / "roi_cache.npz"
     meta_path = d / "roi_cache.json"
     if not npz_path.is_file() or not meta_path.is_file():

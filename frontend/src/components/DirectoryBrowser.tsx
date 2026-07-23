@@ -10,6 +10,13 @@ interface BaseProps {
   mode?: Mode;
   /** When mode='file', only files whose extension (lowercase, leading dot) matches one of these is shown. */
   extensions?: string[];
+  /**
+   * Optional per-file thumbnail URL builder. When provided AND mode='file', each
+   * FILE row renders a small `<img>` (its `src` is `thumbnailFor(entry.path)`)
+   * that falls back to the file icon on load error. Purely decorative; omit for
+   * unchanged (icon-only) behavior.
+   */
+  thumbnailFor?: (path: string) => string;
   onCancel: () => void;
 }
 
@@ -27,7 +34,7 @@ interface MultiSelectProps extends BaseProps {
 type Props = SingleSelectProps | MultiSelectProps;
 
 export default function DirectoryBrowser(props: Props) {
-  const { open, initialPath, mode = 'dir', extensions, onCancel } = props;
+  const { open, initialPath, mode = 'dir', extensions, thumbnailFor, onCancel } = props;
   const multi = 'onSelectMulti' in props && typeof props.onSelectMulti === 'function';
 
   const [roots, setRoots] = useState<string[]>([]);
@@ -40,6 +47,17 @@ export default function DirectoryBrowser(props: Props) {
   const [error, setError] = useState<string | null>(null);
   const [highlight, setHighlight] = useState(0);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  // Paths whose thumbnail <img> failed to load — fall back to the file icon.
+  const [thumbFailed, setThumbFailed] = useState<Set<string>>(() => new Set());
+
+  const markThumbFailed = useCallback((p: string) => {
+    setThumbFailed((prev) => {
+      if (prev.has(p)) return prev;
+      const next = new Set(prev);
+      next.add(p);
+      return next;
+    });
+  }, []);
 
   const previouslyFocused = useRef<HTMLElement | null>(null);
   const dialogRef = useRef<HTMLDivElement | null>(null);
@@ -339,7 +357,19 @@ export default function DirectoryBrowser(props: Props) {
                         className="h-4 w-4 rounded border-border accent-accent"
                       />
                     ) : null}
-                    {entry.is_dir ? <FolderIcon /> : <FileIcon />}
+                    {entry.is_dir ? (
+                      <FolderIcon />
+                    ) : thumbnailFor && mode === 'file' && !thumbFailed.has(entry.path) ? (
+                      <img
+                        src={thumbnailFor(entry.path)}
+                        alt=""
+                        loading="lazy"
+                        onError={() => markThumbFailed(entry.path)}
+                        className="h-8 w-8 shrink-0 rounded border border-border object-cover"
+                      />
+                    ) : (
+                      <FileIcon />
+                    )}
                     <span>{entry.name}</span>
                   </li>
                 );

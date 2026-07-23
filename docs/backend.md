@@ -55,7 +55,8 @@ On startup (`lifespan`):
 On shutdown: `worker.stop_worker()`.
 
 CORS is enabled for `http://localhost:5173` (dev). Routers are mounted in `main.py`:
-`fs, trident, panther, runs, splits, models, labels, notes, inference, jobs, viz`.
+`fs, datasets, trident, panther, runs, splits, models, labels, notes, inference,
+jobs, queue, viz, thumbnails`.
 Health check: `GET /api/health` → `{"status": "ok"}`.
 
 ---
@@ -142,7 +143,11 @@ outputs (`output_dir`, `features_h5_path`, `heatmap_path`, `mixture_plot_path`,
 ### `Job`
 `id`, `created_at` (idx), `started_at`, `finished_at`, `job_type` (idx),
 `ref_table`, `ref_id` (the polymorphic pointer), `status`
-(`queued|running|succeeded|failed`, idx), `error_message`, `log_path`.
+(`queued|running|succeeded|failed|canceled`, idx), `error_message`, `log_path`,
+`queue_position` (int|null), `params` (TEXT|null — per-job JSON parameter blob,
+e.g. `{"slide_id": ...}` for `render_slide`; read by handlers via
+`json.loads(job.params or "{}")`). Both trailing columns are additive (`ALTER
+TABLE` guards in `init_db()`).
 
 ---
 
@@ -158,9 +163,12 @@ start_worker() → daemon thread → _worker_loop()
 
 - **`register_handler(job_type, fn)` / `get_handler(job_type)`** — a `dict` registry.
   Handlers conform to `JobHandler`: `(*, db, job, log) -> None`.
-- **`enqueue_job(db, *, job_type, ref_table, ref_id) -> Job`** — inserts a `queued` row;
-  the worker picks it up. Used by the route layer and by handlers that fan out
-  (`panther_train` enqueues `post_train_viz`).
+- **`enqueue_job(db, *, job_type, ref_table, ref_id, params: dict | None = None) -> Job`** —
+  inserts a `queued` row; the worker picks it up. Used by the route layer and by
+  handlers that fan out (`panther_train` enqueues `post_train_viz`). `params` is
+  JSON-serialized into the `jobs.params` column (`None` → NULL); the handler reads
+  it back via `json.loads(job.params or "{}")` (e.g. `render_slide` passes
+  `{"slide_id": ...}`).
 - **`JobLog`** — a line-buffered append-only file at
   `${VIZ_CACHE_ROOT}/job_logs/{job_id}.log`, always flushed.
 - **`tail_log(job, max_chars=8000)`** — returns the trailing slice for the API/UI.
@@ -176,9 +184,10 @@ The three real handlers:
 
 | Handler | File | Does |
 | --- | --- | --- |
-| `panther_train` | `panther_train.py` | For a Model Group, runs K PANTHER subprocesses sequentially (one `PantherRun` row each); sets each Model `ready`/`failed`; enqueues a `post_train_viz` per successful fold. |
-| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the **Section D** prototype dictionary (supersedes the top-K grid — `topk_grid_path` is no longer set), the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`), the **Section C** on-tissue 2D-embedding map (`render_umap_on_tissue` for that same slide), and the **Section B** validation-consistency charts (`render_validation_consistency` — encoder over the fold's val + sampled train slides; skipped if no val slides); merges all into `model.viz_artifacts={"section_a":{...},"section_b":{...},"section_c":{...},"section_d":{...}}` (load-merge-dump, never clobbering a sibling section) + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
+| `panther_train` | `panther_train.py` | Branches on `job.ref_table`. `"model_groups"` (legacy K-fold): loads the Model Group, runs K PANTHER subprocesses sequentially (one `PantherRun` row each), sets each Model `ready`/`failed`, enqueues a `post_train_viz` per successful fold. `"models"` (standalone single run): loads ONE Model + its Split, runs `_train_one_fold` once (fold 0), sets the Model `ready`/`failed`, and on success enqueues a single `post_train_viz` (`ref_table="models"`). The `PantherRun` row it writes carries `group_id = model.group_id` (== `model.id` for single runs). |
+| `post_train_viz` | `post_train_viz.py` | For one Model: renders ≤3 preview heatmaps, the **Section D** prototype dictionary (supersedes the top-K grid — `topk_grid_path` is no longer set), the UMAP, and the **Section A** panel (thumbnail + hi-res assignment map + π_c bars + index-0 ROI, for one deterministic slide via `pick_preview_slides(count=1)`), the **Section C** on-tissue 2D-embedding map (`render_umap_on_tissue` for that same slide), and the **Section B** validation-consistency charts (`render_validation_consistency` — encoder over the fold's val + sampled train slides; skipped if no val slides), and the **per-slide violin** (`render_slide_violin` for the same preview slide, stored under the distinct `section_b_violin` key); merges all into `model.viz_artifacts={"section_a":{...},"section_b":{...},"section_b_violin":{...},"section_c":{...},"section_d":{...}}` (load-merge-dump, never clobbering a sibling section) + a repick `.npz` cache; sets `viz_status`. Per-step `try/except` → partial output still publishes. |
 | `inference` | `inference_job.py` | For one Inference: hash slide → run TRIDENT → locate `.h5` → render heatmap/mixture/example-patches/t-SNE → `ready` if ≥1 render succeeded. |
+| `render_slide` | `render_slide.py` | On-demand per-slide render for the Model Comparison page. `ref_table="models"`, `ref_id=model_id`, `params={"slide_id": ...}`. Resolves the slide's h5 + WSI (graceful fail if missing), then renders the **PER-SLIDE** panels into `viz_cache/{model_id}/compare/{slide_id}/` via one memoized encoder pass (`get_assignments`): the Section A panel (`render_section_a_for_slide` → thumbnail/assignment_map/π_c/ROI), Section C `on_tissue` (`render_umap_on_tissue`), and the per-slide violin (`render_slide_violin`). Per-step `try/except` (partial success still publishes). Writes a `manifest.json` capturing the per-slide artifact absolute paths + `slide_id` + `roi_bbox`/`roi_index` + `on_tissue` + `violin` — the manifest is how the API reports readiness. Section D + Section C `scatter` are GLOBAL (rendered once at train time) and are **not** recomputed here. |
 
 ---
 
@@ -233,6 +242,38 @@ The three real handlers:
   `/trident-params` endpoint so they always agree.
 - `build_trident_command(...)`, `generate_custom_wsi_csv(...)`, `locate_features_file(...)`,
   `inference_output_dir(model_id, inference_id)` — TRIDENT plumbing for one slide.
+
+### `assignment_cache.py` — per-slide encoder memoization
+A process-local, thread-safe LRU (module-level `OrderedDict`, `MAX_ENTRIES=32`,
+`threading.Lock`) keyed by `(model_id, slide_stem)` → the record
+`(coords, cluster_labels, qq, mixture_probs, patch_size)`. No heavy imports (the
+numpy arrays pass through as opaque objects), no persistence across restarts.
+API: `get`, `put`, `clear_model(model_id)`, `clear()`, and
+`get_or_compute(model_id, slide_stem, compute_fn)` (per-key lock so a miss on one
+key never blocks other keys, and two concurrent renders of the *same* key compute
+once). The key is **model-scoped on purpose**: each model has its own prototypes,
+so assignments are never shared across models. `visualization.get_assignments`
+wraps this; the per-slide renderers (assignment heatmap, mixture plot, example
+patches, per-slide t-SNE, ROI) go through it so several panels for one
+(model, slide) — including the upcoming Compare view — reuse one encoder pass.
+The dataset-wide streamers (`render_topk_grid`, `render_prototype_dictionary`,
+`render_umap`, `render_validation_consistency`) deliberately **do not** use it —
+they stream many h5s and would blow the cache. `post_train_viz._render_section_a`
+`put`s the assignments it already computes so later Section C / B / ROI renders
+for that slide in the same process hit the cache.
+
+### `thumbnails.py` — WSI picker thumbnails (heavy imports lazy)
+- `trident_job_dir(features_dir)` — `Path(features_dir).parent.parent` (pure path math;
+  the TRIDENT job dir is two levels above the features dir).
+- `find_trident_thumbnail(features_dir, slide_stem)` — probes
+  `{job_dir}/thumbnails/{slide_stem}.{jpg|jpeg|png}` (in that order), `resolve_within_roots`
+  the first hit, else `None`. **F3 CAVEAT:** the TRIDENT subpath/extension is unverified.
+- `slide_thumb_cache_key(resolved_path, mtime, size, max_px=512)` — deterministic
+  `sha256(...)[:32]` cache key.
+- `generate_slide_thumbnail(resolved_path, max_px=512)` — lazy `openslide`; renders a plain
+  small RGB JPEG (no scale bar), caches under `{VIZ_CACHE_ROOT}/slide_thumbs/{key}.jpg`
+  (temp-write + atomic replace); raises `ThumbnailError` on any openslide failure.
+  Powers `GET /api/slide-thumbnail` (see §7).
 
 ### `visualization.py` — the renderers
 Lazy PANTHER bootstrap (`_ensure_panther_on_syspath` prepends `${PANTHER_REPO_PATH}/src`),
@@ -297,13 +338,31 @@ artifacts land under `viz_cache/{model_id}/section_a/`.
 | `render_wsi_thumbnail(model, wsi)` | `section_a/thumbnail_{stem}.png` | Downscaled H&E (longest side ≤ `THUMB_MAX_PX=2048`) with a physical scale bar from openslide `MPP_X`. **If MPP is missing, the thumbnail renders without a scale bar — never fails.** |
 | `render_pi_c_barplot(model, mixture_probs)` | `section_a/pi_c.png` | One bar per prototype, **each bar colored by `get_default_cmap(n_proto)`** (same cmap as the assignment map). X labels `C1..Cn`, y label `Proportion π_c`. Takes the GMM `mixture_probs` directly (the third return of `_compute_assignments`). |
 | `render_assignment_heatmap_from_assignments(..., downsample_target=SECTION_A_DOWNSAMPLE=24, out_path=section_a/assignment_map_{stem}.png)` | `section_a/assignment_map_{stem}.png` | Hi-res (zoomable) reuse of the existing heatmap renderer with a smaller downsample target. |
-| `render_roi_from_assignments(model, coords, labels, ps, wsi, roi_index)` → `(raw, colored, [x,y,w,h], used_idx, n_windows)` | `section_a/roi_raw_{stem}_{idx}.png`, `section_a/roi_colored_{stem}_{idx}.png` | Deterministically picks a `ROI_GRID×ROI_GRID` (7×7) tile of patches by ranking non-overlapping windows (**diversity then density**); `roi_index` selects the i-th (wraps via modulo, so the UI can "repick"). `raw` = openslide `read_region` of the window + scale bar; `colored` = the window tiled as its patches, each blended with its prototype color. |
+| `render_roi_from_assignments(model, coords, labels, ps, wsi, roi_index)` → `(raw, colored, [x,y,w,h], used_idx, n_windows)` | `section_a/roi_raw_{stem}_{idx}.png`, `section_a/roi_colored_{stem}_{idx}.png` | Deterministically picks a `ROI_GRID×ROI_GRID` (7×7) tile of patches by ranking non-overlapping windows (**diversity then density**); `roi_index` selects the i-th (wraps via modulo, so the UI can "repick"). Delegates the actual raw/colored render to `_render_roi_window`. `raw` = openslide `read_region` of the window + scale bar; `colored` = the window tiled as its patches, each blended with its prototype color. |
+| `render_roi_at_point(model, coords, labels, ps, wsi, fx, fy, *, out_dir=None)` → `(raw, colored, [x,y,w,h], used_idx, n_windows)` | same as above | **Manual click pick.** `fx,fy` in `[0,1]` over the natural assignment-map image (spanning the coords bbox); maps to a level-0 point `tx=xmin+fx·(xmax-xmin)`, `ty=ymin+fy·(ymax-ymin)` (with `xmax,ymax` = coords max **+ patch_size**). Ranks the same `_select_roi_windows`, picks the window that **contains** `(tx,ty)`; if none contains it (gap tile), picks the window whose **center is nearest**. `used_idx` = that window's rank. Clamps `fx,fy` defensively. Powers `POST /select-roi`. |
+| `_render_roi_window(model, coords, labels, ps, wsi, window, idx, n, out_dir)` → `(raw, colored, [x,y,w,h], idx, n)` | same as above | Private shared body factored out of `render_roi_from_assignments`: renders one chosen `(x0,y0,w,h,member_idxs)` window (raw H&E crop + scale bar, colored patch tiling). Used by both `render_roi_from_assignments` (index pick) and `render_roi_at_point` (click pick). |
 | `render_roi(model, h5, wsi, roi_index=0)` → `(raw, colored, [x,y,w,h])` | same as above | Convenience wrapper that runs the encoder, then calls `render_roi_from_assignments`. |
 
-**Repick cache.** `save_section_a_cache(model, slide_id, coords, labels, patch_size)` writes
-`section_a/roi_cache.npz` (coords + cluster_labels) and `section_a/roi_cache.json`
-(slide_id + patch_size); `load_section_a_cache(model)` reads them back. This lets the
-repick-ROI endpoint re-tile **without re-running the encoder**.
+**Repick cache.** `save_section_a_cache(model, slide_id, coords, labels, patch_size, *, out_dir=None)`
+writes `roi_cache.npz` (coords + cluster_labels) and `roi_cache.json` (slide_id +
+patch_size) into `out_dir` (default `section_a/`); `load_section_a_cache(model, *, out_dir=None)`
+reads them back. This lets the repick-ROI endpoint re-tile **without re-running the
+encoder**. Both are per-slide: the Compare page passes `out_dir=compare/{slide_id}/` so an
+arbitrary slide's ROI can be re-tiled.
+
+**Per-slide render generalization (Model Comparison).** The Section A + Section C
+`on_tissue` + violin renderers all accept an arbitrary output dir so the same code
+serves both the train-time preview slide and the on-demand Compare slide:
+
+| Function | Output |
+| --- | --- |
+| `compare_slide_dir(model, slide_id)` | Returns `viz_cache/{model_id}/compare/{slide_id}/` (does **not** mkdir — a GET probing for a manifest shouldn't leave empty dirs). |
+| `render_section_a_for_slide(model, slide_id, h5_path, wsi_path, *, out_dir=None, log=None)` | Renders the whole Section A panel (thumbnail/assignment_map/π_c/ROI) into `out_dir` (default `section_a_dir`). One encoder pass via `get_assignments`; per-render `try/except`; writes the repick cache into `out_dir`. Used by BOTH `post_train_viz` and `render_slide`. Returns the `section_a` dict. |
+| `render_slide_violin(model, feats, cluster_labels, *, out_dir=None)` | Per-slide violin (F4): per prototype c, the cosine similarity of each patch assigned to c to prototype c's trained center, colored by `get_default_cmap(n_proto)`. Output `{out_dir}/violin.png` (default `section_b_violin/`). Returns `{"violin", "counts"}`. Distinct from the val-based Section B. |
+
+`render_wsi_thumbnail`, `render_pi_c_barplot`, and `render_roi_from_assignments` each also
+gained an optional `out_dir` param (default `section_a_dir`); the train-time paths are
+unchanged.
 
 ---
 
@@ -320,6 +379,69 @@ All under `/api`. Schemas live in `app/models/schemas.py`; the interactive spec 
 | GET | `/api/fs/csv-count?path=` | Row count of a CSV (header skipped). |
 | GET | `/api/fs/csv-inspect?path=` | CSV diagnostics: `{rows, columns[], has_slide_id, slide_id_column, tif_count, sample_ids[]}`. Detects the slide-id column case-insensitively (shared `SLIDE_ID_COLUMNS`); `tif_count` = values ending in `.tif`/`.tiff`. Lazy `pandas` import. |
 
+### Datasets — `routes/datasets.py` (Model Comparison page)
+
+There is **no** Dataset/Slide table: `dataset_name` is a denormalized string on
+`Model`, and "slides" are just the per-slide `.h5` files under a model's TRIDENT
+`features_dir`. Only **non-legacy** models participate — standalone runs carry
+`run_kind="single"`, legacy K-fold folds have `run_kind IS NULL`. A dataset whose
+only models are legacy folds is invisible here. All three endpoints derive
+everything from `Model` rows; no ML imports.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/datasets` | Distinct `dataset_name`s with ≥1 `run_kind="single"` model. |
+| GET | `/api/datasets/{dataset_name}/slides` | Slides (`.h5` stems) under a representative model's `features_dir`, each with a WSI/thumbnail link. |
+| GET | `/api/datasets/{dataset_name}/models` | The `run_kind="single"` `ModelInfo`s for the dataset (Add-model dropdown; UI caps at 4). |
+
+**`GET /api/datasets`** → `list[DatasetSummary]`. One row per distinct
+`dataset_name` that has at least one single model (legacy-only datasets are
+excluded), sorted by name. `model_count` counts single models only; `slide_count`
+is deferred to the slides endpoint (left `null` — enumerating h5s isn't free).
+
+```json
+[ { "dataset_name": "TCGA_BRCA", "model_count": 3, "slide_count": null } ]
+```
+
+**`GET /api/datasets/{dataset_name}/slides`** → `DatasetSlidesResponse`. Picks the
+**newest** `run_kind="single"` model for the dataset as the representative (source
+of `features_dir` + `wsi_dir` via `visualization.resolve_dataset_wsi_dir`).
+**404** if the dataset has no non-legacy model. A missing / out-of-roots /
+unreadable `features_dir` degrades gracefully (empty `slides` + a `note`, never a
+500). Slide enumeration = `.h5` files **directly** under `features_dir` (not
+recursive), `slide_id = stem`, sorted. For each slide `resolve_wsi_path(slide_id,
+wsi_dir)` finds the WSI (may be `None`); when resolved (and inside roots) a
+`thumbnail_url` is built pointing at `GET /api/slide-thumbnail` with the
+url-encoded `path` + `features_dir` params. `resolve_within_roots` gates both the
+`features_dir` and every WSI path.
+
+```json
+{ "dataset_name": "TCGA_BRCA",
+  "features_dir": "<abs features dir>",
+  "wsi_dir": "<abs wsi dir | null>",
+  "slides": [
+    { "slide_id": "slideA",
+      "wsi_path": "<abs wsi path | null>",
+      "has_wsi": true,
+      "thumbnail_url": "/api/slide-thumbnail?path=<enc>&features_dir=<enc>" } ],
+  "slide_count": 1,
+  "thumbnails_found": 1,
+  "note": null }
+```
+
+**F3 diagnostic — `thumbnails_found`.** An early-signal count of how many of the
+enumerated slides already have a TRIDENT-written thumbnail on disk at
+`{job_dir}/thumbnails/{stem}.{jpg|jpeg|png}` (`job_dir = features_dir.parent.parent`),
+probed via `thumbnails.find_trident_thumbnail` (same **UNVERIFIED** subpath/extension
+guess as `GET /api/slide-thumbnail` step 2 — see §7 F3 CAVEAT). If this comes back
+0 on the real GPU data dir while thumbnails clearly exist, TRIDENT is using a
+different subdir/extension and `_TRIDENT_THUMB_EXTS` / `find_trident_thumbnail`
+need updating.
+
+**`GET /api/datasets/{dataset_name}/models`** → `list[ModelInfo]` — the
+`run_kind="single"` models for the dataset, `created_at` desc, built with the same
+`_model_to_info` as `routes/panther.py`.
+
 ### TRIDENT — `routes/trident.py` + `routes/runs.py`
 | Method | Path | Purpose |
 | --- | --- | --- |
@@ -331,16 +453,26 @@ All under `/api`. Schemas live in `app/models/schemas.py`; the interactive spec 
 ### Splits — `routes/splits.py`
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/api/splits` | Create a K-fold split from a source CSV. |
+| POST | `/api/splits` | Create a split from a source CSV. Body `CreateSplitRequest` carries `kind: "kfold" \| "single"` (default `"kfold"`). `kind="kfold"` → `create_kfold_split` (needs `k>=2`); `kind="single"` → `create_single_split` (a single "100% train" fold, `k=1`, `k` ignored). Same `SplitInfo` shape either way. |
 | GET | `/api/splits[?dataset_name=]` | List splits. |
 | GET | `/api/splits/{id}` | One split. |
+
+**`create_single_split` (single "100% train" split).** Writes one fold dir
+`{split_name}/k=0/` where `train.csv` holds the header + **all** data rows
+(same slide-id detection + `.tif`/`.tiff` stripping as K-fold), plus header-only
+`val.csv`/`test.csv` so any downstream glob still finds them. `split_name =
+alltrain_seed_{seed}_{rand8}`. `metadata.json` mirrors the K-fold fields with
+`k=1`, `per_fold_counts=[{train:N,val:0,test:0}]`, and a `kind: "single"` marker.
+Returns the same `KFoldSplitInfo` shape (`k==1`). PANTHER only ever reads
+`train.csv`, so this trains on every slide.
 
 ### PANTHER training — `routes/panther.py`
 | Method | Path | Purpose |
 | --- | --- | --- |
-| POST | `/api/panther/runs` | Create Model Group + K Models, enqueue `panther_train`, return `{group_id, job_id, k, split_id, split_name, model_ids}`. |
+| POST | `/api/panther/runs` | **(legacy K-fold)** Create Model Group + K Models, enqueue `panther_train` (`ref_table="model_groups"`), return `{group_id, job_id, k, split_id, split_name, model_ids}`. |
+| POST | `/api/panther/single-runs` | **(standalone)** Train ONE model — no `ModelGroup`. Creates one `Model` with `group_id==model_id`, `fold_index=0`, `fold_k=1`, `run_kind="single"`, `model_name={name}_{rand8}`; enqueues `panther_train` (`ref_table="models"`). Body `PantherSingleRunRequest`; returns `{model_id, job_id, split_id, split_name}`. Requires a single ("100% train") split. |
 | GET | `/api/panther/runs[?group_id=]` | List per-fold execution logs (`PantherRun`). |
-| GET | `/api/panther/models[?group_id=&dataset_name=]` | List fold Models. |
+| GET | `/api/panther/models[?group_id=&dataset_name=&run_kind=]` | List Models. `run_kind="single"` filters to standalone runs; `"kfold"`/omitted for legacy folds. |
 
 ### Model groups & models — `routes/models.py`
 | Method | Path | Purpose |
@@ -353,7 +485,14 @@ All under `/api`. Schemas live in `app/models/schemas.py`; the interactive spec 
 | PATCH | `/api/models/{id}` | Set `is_favorite` / `display_name`. |
 | POST | `/api/models/{id}/shuffle-preview` | Re-pick 3 preview slides + enqueue a `post_train_viz` re-render. |
 | POST | `/api/models/{id}/repick-roi` | Re-render the Section A ROI at the **next** window (wraps around), update `viz_artifacts.section_a.roi_*`/`roi_bbox`/`roi_index`, return the updated `ModelInfo`. **Synchronous** (uses the cached coords/labels — no encoder run). 404 missing model; **409** if Section A isn't rendered yet (no `section_a` / no repick cache / WSI gone); 422 if the slide has no tissue window. |
+| POST | `/api/models/{id}/select-roi` | **Manual point-based ROI pick.** Body `{slide_id: str\|null, fx: float, fy: float}` — `fx,fy` in `[0,1]` over the natural assignment-map image (clamped server-side). Renders the ROI window **containing** the click (or the nearest-center window if the click hit a gap tile) and persists it. Two modes: `slide_id=null` → the Section A **preview** slide (loads `load_section_a_cache` from `section_a_dir`; updates `viz_artifacts.section_a.roi_*`/`roi_bbox`/`roi_index`; returns the updated `ModelInfo`). `slide_id` given → the **compare** slide (loads the cache from `compare/{slide_id}/`; rewrites that `manifest.json`'s `roi_*`; returns `{status:"ready", artifacts}` like `/slide-viz`). **Synchronous** (uses cached coords/labels — no encoder run). 404 missing model; **409** if the targeted panel/cache/WSI is unavailable (no `section_a` for preview, no compare manifest for a slide); 422 if the slide has no tissue window. |
+| POST | `/api/models/{id}/render-slide` | On-demand per-slide render for the Model Comparison page. Body `{slide_id}`. Validates the model (404), the `slide_id` format (422 — `^[A-Za-z0-9._-]+$`, no traversal), and `{features_dir}/{slide_id}.h5` presence (422). **Cache-aware:** if `compare/{slide_id}/manifest.json` exists → `{status:"ready", artifacts}` (no job). Else enqueues a `render_slide` job (`params={"slide_id"}`) → `{status:"rendering", job_id}`; poll `/api/jobs?ref_table=models` for progress, then GET `/slide-viz`. |
+| GET | `/api/models/{id}/slide-viz?slide_id=` | Read the per-slide render manifest. `{status:"ready", artifacts}` when `compare/{slide_id}/manifest.json` exists, else `{status:"missing"}`. 404 missing model; 422 bad `slide_id`. |
 | GET | `/api/models/{id}/trident-params` | The encoder/mag/patch_size/gpus a model inherits, + expected features dir name. |
+
+`ModelInfo.run_kind` is `"single"` for standalone runs (created via
+`/api/panther/single-runs`) and `null` for legacy K-fold folds; the frontend uses it to
+separate the two browsers.
 
 `ModelInfo.viz_artifacts` is the parsed `Model.viz_artifacts` JSON column (null-safe), also
 included in the group-detail response (`/api/model-groups/{id}` reuses `_model_to_info`).
@@ -412,6 +551,40 @@ at the abstract UMAP this handler renders (`model.umap_path`); if that render fa
 `section_c`, `section_d`) are written with a load-merge-dump so rendering one never clobbers
 the others.
 
+The per-slide violin (F4) rides alongside under the distinct `section_b_violin` key
+(separate from the val-based `section_b`):
+
+```json
+{ "section_b_violin": {
+    "violin": "<abs viz path — section_b_violin/violin.png>",
+    "counts": [n_c for c in range(n_proto)],
+    "slide_id": "<same deterministic slide as section_a>"
+} }
+```
+
+**Per-slide render manifest (Model Comparison).** The `render_slide` handler writes
+`viz_cache/{model_id}/compare/{slide_id}/manifest.json`. Its shape mirrors `section_a`
+plus `on_tissue` + `violin` (all absolute `viz_cache` paths). `POST /render-slide` (cache
+hit) and `GET /slide-viz` return it verbatim as `artifacts`:
+
+```json
+{ "slide_id": "<stem>",
+  "thumbnail": "<abs viz path>",
+  "assignment_map": "<abs viz path>",
+  "pi_c": "<abs viz path>",
+  "roi_raw": "<abs viz path>",
+  "roi_colored": "<abs viz path>",
+  "roi_bbox": [x, y, w, h],
+  "roi_index": 0,
+  "on_tissue": "<abs viz path>",
+  "violin": "<abs viz path>",
+  "violin_counts": [n_c, ...] }
+```
+
+Any individual render that fails is simply absent from the manifest (partial success still
+publishes). Section D (prototype dictionary) and Section C `scatter` (`model.umap_path`) are
+**global** — rendered once per model at train time — and are **not** recomputed per slide.
+
 `prototypes` has one entry for **every** `c in range(n_proto)` (prototypes with no
 representative patches carry an empty `patches` list, so the UI always shows a
 column). `color` is the prototype's `get_default_cmap(n_proto)` color as `#rrggbb`,
@@ -462,6 +635,35 @@ two sections are written with a load-merge-dump so rendering one never clobbers 
 | --- | --- | --- |
 | GET | `/api/viz/placeholder/{kind}?label=&width=&height=` | Synthesized SVG placeholder (`heatmap|mixture|patches|tsne|topk|umap`). |
 | GET | `/api/viz/{file_path:path}` | Serve a real rendered file from `VIZ_CACHE_ROOT` or `INFERENCE_ROOT`. Absolute or root-relative; out-of-root → 403, missing → 404. |
+
+### Slide thumbnails — `routes/thumbnails.py`
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/api/slide-thumbnail?path=&features_dir=&max_px=` | Small WSI thumbnail for the slide pickers. Returns a **binary image** (FileResponse), not JSON. |
+
+`GET /api/slide-thumbnail` (mounted at `/api`, not under `/api/viz`, so it doesn't
+collide with the `/api/viz/{file_path:path}` catch-all):
+
+1. `resolve_within_roots(path)` (security boundary → **403** outside roots), then
+   requires the resolved path to be an existing file (**404** if not).
+2. **TRIDENT thumbnail first** (only if `features_dir` is supplied). TRIDENT writes
+   per-slide thumbnails under `{job_dir}/thumbnails/{slide_stem}.{jpg|jpeg|png}`, where
+   the features layout is `{job_dir}/{mag}x_{ps}px_0px_overlap/features_{encoder}` (see
+   `runner.output_dir_for`) — so `job_dir = Path(features_dir).parent.parent`
+   (`thumbnails.trident_job_dir`). We probe those three extensions in order; the first hit
+   is run through `resolve_within_roots` and served directly with header
+   `X-Thumbnail-Source: trident`. If none match, fall through to generation.
+   **F3 CAVEAT — UNVERIFIED:** the exact TRIDENT thumbnail subpath/extension is a guess
+   (the TRIDENT README was not vendored). Confirm on the real GPU data dir; if TRIDENT
+   uses a different subdir/extension, update `_TRIDENT_THUMB_EXTS` /
+   `find_trident_thumbnail` in `services/thumbnails.py`.
+3. **Fallback — generate.** Open the WSI with openslide (**lazy** import), render a plain
+   small RGB JPEG (longest side ≤ `max_px`, default 512, no scale bar / coords overlay),
+   and cache it under `{VIZ_CACHE_ROOT}/slide_thumbs/{key}.jpg` where
+   `key = sha256(resolved_path | mtime | size | max_px)[:32]`
+   (`thumbnails.slide_thumb_cache_key`, deterministic → cheap on repeat). Served with
+   `X-Thumbnail-Source: generated`. Any openslide failure → **422** (`ThumbnailError`);
+   the picker falls back to a placeholder icon client-side.
 
 ---
 

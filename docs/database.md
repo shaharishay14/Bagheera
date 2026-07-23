@@ -54,7 +54,7 @@ jobs  (ref_table, ref_id) → polymorphic → any of: model_groups | models | in
 
 ### `Model`
 Central row. `id`, `created_at`; naming (`base_name`, `model_name` (**unique**),
-`display_name`); grouping (`group_id` (indexed), `fold_index`, `fold_k`); inputs
+`display_name`); grouping (`group_id` (indexed), `fold_index`, `fold_k`, `run_kind`); inputs
 (`dataset_name`, `features_dir`, `trident_run_id`, `split_id`, `split_name`,
 `split_dir_abs`); PANTHER hyperparams (`mode`, `in_dim`, `n_proto_patches`, `n_proto`,
 `n_init`, `seed`, `num_workers`); outcome (`status` `pending|running|ready|failed`,
@@ -68,6 +68,11 @@ Central row. `id`, `created_at`; naming (`base_name`, `model_name` (**unique**),
   "assignment_map", "pi_c", "roi_raw", "roi_colored", "roi_bbox", "roi_index"}}`.
   Added post-initial-schema via the `_ensure_viz_artifacts_column()` `ALTER TABLE`
   guard in `init_db()` (backfills existing DBs without a wipe).
+- `run_kind` (VARCHAR(16), **nullable**, default NULL): run-kind discriminator.
+  `"single"` for the new standalone-model runs (where `group_id == id`,
+  `fold_index = 0`, `fold_k = 1`); `NULL` for legacy K-fold folds. Added
+  post-initial-schema via the `_ensure_run_kind_column()` `ALTER TABLE` guard in
+  `init_db()` (backfills existing DBs without a wipe).
 
 ### `PantherRun`
 Per-fold subprocess execution log: `id`, `created_at`, `group_id` (indexed),
@@ -100,7 +105,15 @@ outputs (`output_dir`, `features_h5_path`, `heatmap_path`, `mixture_plot_path`,
 `ref_table`, `ref_id` (polymorphic pointer), `status`
 (`queued|running|succeeded|failed|canceled`, indexed), `error_message`, `log_path`,
 `queue_position` (int|null, added via `ALTER TABLE` guard — lower = runs sooner;
-NULL once a job leaves the queue).
+NULL once a job leaves the queue), `params` (TEXT|null — per-job JSON parameter
+blob, added via `ALTER TABLE` guard).
+
+- `params` (TEXT, **nullable**, default NULL): free-form JSON string of per-job
+  parameters, e.g. `{"slide_id": "..."}` for a `render_slide` job. Set by
+  `enqueue_job(..., params=...)`; handlers read it via
+  `json.loads(job.params or "{}")`. Legacy job rows keep NULL. Added
+  post-initial-schema via the `_ensure_job_params_column()` `ALTER TABLE` guard in
+  `init_db()` (backfills existing DBs without a wipe).
 
 ---
 
@@ -114,8 +127,17 @@ Valid `(ref_table, job_type)` pairings:
 | `ref_table` | `job_type` |
 | --- | --- |
 | `model_groups` | `panther_train` |
+| `models` | `panther_train` |
 | `models` | `post_train_viz` |
+| `models` | `render_slide` |
 | `inferences` | `inference` |
+
+> `render_slide` carries `params={"slide_id": ...}` — the on-demand per-slide
+> render for the Model Comparison page.
+
+> The `models → panther_train` pairing is the new standalone-training path (one
+> `Model` row trained directly, `run_kind = "single"`). The legacy
+> `model_groups → panther_train` pairing remains valid for existing K-fold data.
 
 ---
 
@@ -139,5 +161,14 @@ Valid `(ref_table, job_type)` pairings:
   TABLE … ADD COLUMN … DEFAULT …` guard in `init_db()`, document it in this file.
 - **Adding an index**: use `Index(…)` in `models.py` and wipe+recreate (no guard needed
   if index is purely additive — a missing index degrades perf, not correctness).
+- **`models.run_kind` (additive, no wipe)**: added as a nullable discriminator via the
+  `_ensure_run_kind_column()` `ALTER TABLE` guard in `init_db()`. Legacy rows keep
+  `run_kind = NULL`; new standalone runs set `"single"`. No existing column was dropped
+  or made non-nullable — legacy K-fold DBs survive untouched.
+- **`jobs.params` (additive, no wipe)**: nullable TEXT column carrying a per-job JSON
+  parameter blob, added via the `_ensure_job_params_column()` `ALTER TABLE` guard in
+  `init_db()`. Legacy rows keep NULL. Introduced so the `render_slide` job can pass a
+  `slide_id` through the queue to its handler (the `jobs` table previously had no
+  free-form param column).
 
 > Keep this file in sync whenever you change `app/db/models.py`.

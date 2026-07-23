@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import ensure_storage_dirs, settings
 from app.db.database import init_db
 from app.routes import (
+    datasets,
     fs,
     inference,
     jobs,
@@ -19,10 +20,17 @@ from app.routes import (
     queue,
     runs,
     splits,
+    thumbnails,
     trident,
     viz,
 )
-from app.services import inference_job, panther_train, post_train_viz, worker
+from app.services import (
+    inference_job,
+    panther_train,
+    post_train_viz,
+    render_slide,
+    worker,
+)
 from app.services.job_handlers import register_stub_handlers
 
 
@@ -33,6 +41,7 @@ def _register_handlers() -> None:
     panther_train.register()
     post_train_viz.register()
     inference_job.register()
+    render_slide.register()
 
 
 @asynccontextmanager
@@ -58,6 +67,7 @@ app.add_middleware(
 )
 
 app.include_router(fs.router)
+app.include_router(datasets.router)
 app.include_router(trident.router)
 app.include_router(panther.router)
 app.include_router(runs.router)
@@ -69,6 +79,7 @@ app.include_router(inference.router)
 app.include_router(jobs.router)
 app.include_router(queue.router)
 app.include_router(viz.router)
+app.include_router(thumbnails.router)
 
 
 @app.get("/api/health")

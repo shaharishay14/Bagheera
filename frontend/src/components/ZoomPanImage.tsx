@@ -7,16 +7,59 @@ interface Props {
   className?: string;
   /** Max zoom factor. Default 6×. */
   maxScale?: number;
+  /**
+   * When true, arm a "select" interaction: the viewport shows a crosshair and a
+   * click (a pointer up that did not drag) reports normalized image coords via
+   * {@link Props.onImageClick}. When false/undefined, behavior is unchanged.
+   */
+  armed?: boolean;
+  /** Called with `fx,fy ∈ [0,1]` over the natural image on an armed click. */
+  onImageClick?: (fx: number, fy: number) => void;
+  /**
+   * Controlled transform. When provided, this component renders from the prop
+   * instead of owning its transform state, and reports every clamped change via
+   * {@link Props.onTransformChange} rather than committing internally. Lets a
+   * parent mirror one pan/zoom across several images (Compare page "sync"). When
+   * absent the component is uncontrolled exactly as before.
+   */
+  transform?: Transform;
+  /** Called with the clamped transform on every change while controlled. */
+  onTransformChange?: (t: Transform) => void;
 }
 
 const MIN_SCALE = 1;
 const WHEEL_STEP = 0.0015; // sensitivity per wheel delta unit
 const BUTTON_STEP = 1.4; // multiplicative zoom per +/- click
+// A pointer that travels more than this (px) between down and up is a pan-drag,
+// not a select-click — so an armed pan never fires a spurious selection.
+const DRAG_SLOP = 4;
 
-interface Transform {
+export interface Transform {
   scale: number;
   tx: number;
   ty: number;
+}
+
+/**
+ * Map a viewport-relative click to normalized coordinates over the NATURAL
+ * (scale-1) image, inverting the pan/zoom transform. `imgW`/`imgH` are the
+ * image's layout size at scale 1 (`offsetWidth`/`offsetHeight`). Result is
+ * clamped to `[0,1]` so a click just outside the content still lands in range.
+ *
+ * Pure and exported for unit testing.
+ */
+export function normalizedClick(
+  rect: { left: number; top: number },
+  tf: Transform,
+  imgW: number,
+  imgH: number,
+  clientX: number,
+  clientY: number
+): { fx: number; fy: number } {
+  const clamp01 = (v: number) => Math.min(1, Math.max(0, v));
+  const fx = clamp01((clientX - rect.left - tf.tx) / tf.scale / imgW);
+  const fy = clamp01((clientY - rect.top - tf.ty) / tf.scale / imgH);
+  return { fx, fy };
 }
 
 /**
@@ -32,12 +75,33 @@ interface Transform {
  * The authoritative transform lives in a ref (`tfRef`) so wheel/pointer math
  * reads fresh values synchronously; React state mirrors it purely for render.
  */
-export default function ZoomPanImage({ src, alt, className = '', maxScale = 6 }: Props) {
+export default function ZoomPanImage({
+  src,
+  alt,
+  className = '',
+  maxScale = 6,
+  armed = false,
+  onImageClick,
+  transform,
+  onTransformChange,
+}: Props) {
+  const controlled = transform !== undefined;
   const viewportRef = useRef<HTMLDivElement>(null);
   const imgRef = useRef<HTMLImageElement>(null);
-  const tfRef = useRef<Transform>({ scale: 1, tx: 0, ty: 0 });
-  const [tf, setTf] = useState<Transform>({ scale: 1, tx: 0, ty: 0 });
+  const tfRef = useRef<Transform>(transform ?? { scale: 1, tx: 0, ty: 0 });
+  const [tf, setTf] = useState<Transform>(transform ?? { scale: 1, tx: 0, ty: 0 });
+
+  // While controlled, keep the ref (read synchronously by wheel/pointer math)
+  // and the render state in lockstep with the prop the parent drives.
+  useEffect(() => {
+    if (transform !== undefined) {
+      tfRef.current = transform;
+      setTf(transform);
+    }
+  }, [transform]);
   const dragRef = useRef<{ x: number; y: number } | null>(null);
+  // Where the pointer went down — used to tell a select-click from a pan-drag.
+  const downRef = useRef<{ x: number; y: number } | null>(null);
   const [grabbing, setGrabbing] = useState(false);
 
   // Clamp a candidate transform so the scaled image always covers the viewport
@@ -65,8 +129,14 @@ export default function ZoomPanImage({ src, alt, className = '', maxScale = 6 }:
   const commit = useCallback((t: Transform) => {
     const c = clamp(t);
     tfRef.current = c;
-    setTf(c);
-  }, [clamp]);
+    if (controlled) {
+      // Parent owns the state: report the clamped transform and let it flow
+      // back through the `transform` prop (the effect above re-syncs `tf`).
+      onTransformChange?.(c);
+    } else {
+      setTf(c);
+    }
+  }, [clamp, controlled, onTransformChange]);
 
   // Zoom to a target scale while keeping the viewport-relative anchor fixed.
   const zoomTo = useCallback((nextScale: number, anchorX: number, anchorY: number) => {
@@ -93,6 +163,9 @@ export default function ZoomPanImage({ src, alt, className = '', maxScale = 6 }:
   }, [zoomTo]);
 
   const onPointerDown = (e: React.PointerEvent) => {
+    // Always record the down position so an armed click can be recognized even
+    // at scale 1 (where panning — and thus pointer capture — is disabled).
+    downRef.current = { x: e.clientX, y: e.clientY };
     if (tfRef.current.scale <= MIN_SCALE) return;
     dragRef.current = { x: e.clientX, y: e.clientY };
     setGrabbing(true);
@@ -117,6 +190,21 @@ export default function ZoomPanImage({ src, alt, className = '', maxScale = 6 }:
       /* pointer already released */
     }
   };
+  const onPointerUp = (e: React.PointerEvent) => {
+    const down = downRef.current;
+    downRef.current = null;
+    endDrag(e);
+    // An armed click: pointer up close to where it went down (not a pan-drag).
+    if (!armed || !onImageClick || !down) return;
+    const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+    if (moved > DRAG_SLOP) return;
+    const vp = viewportRef.current;
+    const img = imgRef.current;
+    if (!vp || !img) return;
+    const rect = vp.getBoundingClientRect();
+    const { fx, fy } = normalizedClick(rect, tfRef.current, img.offsetWidth, img.offsetHeight, e.clientX, e.clientY);
+    onImageClick(fx, fy);
+  };
 
   const zoomByButton = (factor: number) => {
     const vp = viewportRef.current;
@@ -137,13 +225,13 @@ export default function ZoomPanImage({ src, alt, className = '', maxScale = 6 }:
         draggable={false}
         onPointerDown={onPointerDown}
         onPointerMove={onPointerMove}
-        onPointerUp={endDrag}
+        onPointerUp={onPointerUp}
         onPointerCancel={endDrag}
         onLoad={() => commit(tfRef.current)}
         style={{
           transform: `translate(${tf.tx}px, ${tf.ty}px) scale(${tf.scale})`,
           transformOrigin: '0 0',
-          cursor: zoomed ? (grabbing ? 'grabbing' : 'grab') : 'default',
+          cursor: armed ? 'crosshair' : zoomed ? (grabbing ? 'grabbing' : 'grab') : 'default',
           touchAction: 'none',
         }}
         className="block w-full select-none"

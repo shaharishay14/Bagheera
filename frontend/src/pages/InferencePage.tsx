@@ -15,6 +15,7 @@ import {
   lookupInference,
   rerunInference,
   resolveVizUrl,
+  slideThumbnailUrl,
   vizPlaceholderUrl,
   type ExamplePatchesResponse,
   type InferenceInfo,
@@ -237,13 +238,19 @@ export default function InferencePage() {
     <div className="space-y-6">
       <div>
         <Link
-          to={`/models/${encodeURIComponent(model.group_id)}`}
+          to={
+            model.run_kind === 'single'
+              ? `/models/${encodeURIComponent(model.id)}`
+              : `/models/group/${encodeURIComponent(model.group_id)}`
+          }
           className="text-xs text-ink-faint hover:text-ink transition-colors"
         >
           ← {model.display_name || model.base_name}
         </Link>
         <h2 className="mt-1 text-xl font-bold text-ink">
-          Inference · Fold {model.fold_index + 1} of {model.fold_k}
+          {model.run_kind === 'single'
+            ? 'Inference'
+            : `Inference · Fold ${model.fold_index + 1} of ${model.fold_k}`}
         </h2>
         <p className="text-xs text-ink-faint font-mono">{model.model_name}</p>
       </div>
@@ -340,6 +347,7 @@ export default function InferencePage() {
         open={browserOpen}
         mode="file"
         extensions={WSI_EXTENSIONS}
+        thumbnailFor={(p) => slideThumbnailUrl(p)}
         onCancel={() => setBrowserOpen(false)}
         {...(mode === 'single'
           ? { onSelect: onBrowserSingle }
