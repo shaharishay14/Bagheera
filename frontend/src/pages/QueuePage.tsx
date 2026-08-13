@@ -274,7 +274,7 @@ export default function QueuePage() {
   );
 }
 
-function moveBefore(list: JobView[], id: string, targetId: string): JobView[] {
+export function moveBefore(list: JobView[], id: string, targetId: string): JobView[] {
   if (id === targetId) return list;
   const from = list.findIndex((j) => j.id === id);
   const to = list.findIndex((j) => j.id === targetId);
@@ -285,7 +285,7 @@ function moveBefore(list: JobView[], id: string, targetId: string): JobView[] {
   return next;
 }
 
-function sameOrder(a: string[], b: string[]): boolean {
+export function sameOrder(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   return a.every((x, i) => x === b[i]);
 }
