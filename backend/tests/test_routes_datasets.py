@@ -75,19 +75,19 @@ def test_list_datasets_only_single_models(client, db, tmp_path):
     _make_model(db, dataset_name="dsA", features_dir=feats)
     # dsB: one single model
     _make_model(db, dataset_name="dsB", features_dir=feats)
-    # dsLegacy: ONLY legacy (run_kind=None) folds -> must NOT appear
-    _make_model(db, dataset_name="dsLegacy", features_dir=feats, run_kind=None)
+    # dsUntagged: ONLY models with run_kind unset -> must NOT appear
+    _make_model(db, dataset_name="dsUntagged", features_dir=feats, run_kind=None)
 
     resp = client.get("/api/datasets")
     assert resp.status_code == 200, resp.text
     body = resp.json()
     names = [d["dataset_name"] for d in body]
-    assert names == ["dsA", "dsB"]  # sorted, no dsLegacy
+    assert names == ["dsA", "dsB"]  # sorted, no dsUntagged
     counts = {d["dataset_name"]: d["model_count"] for d in body}
     assert counts == {"dsA": 2, "dsB": 1}
 
 
-def test_list_datasets_legacy_plus_single_counts_only_single(client, db, tmp_path):
+def test_list_datasets_counts_only_models_tagged_single(client, db, tmp_path):
     feats = tmp_path / "feats"
     feats.mkdir()
     _make_model(db, dataset_name="mixed", features_dir=feats, run_kind="single")
@@ -200,11 +200,11 @@ def test_slides_404_unknown_dataset(client, db):
     assert resp.status_code == 404
 
 
-def test_slides_404_when_only_legacy_models(client, db, tmp_path):
+def test_slides_404_when_no_model_is_tagged_single(client, db, tmp_path):
     feats = tmp_path / "feats"
     feats.mkdir()
-    _make_model(db, dataset_name="legacyOnly", features_dir=feats, run_kind=None)
-    resp = client.get("/api/datasets/legacyOnly/slides")
+    _make_model(db, dataset_name="untagged", features_dir=feats, run_kind=None)
+    resp = client.get("/api/datasets/untagged/slides")
     assert resp.status_code == 404
 
 
@@ -218,7 +218,7 @@ def test_dataset_models_only_single(client, db, tmp_path):
     newer = datetime.utcnow()
     m_old = _make_model(db, dataset_name="dsM", features_dir=feats, created_at=older)
     m_new = _make_model(db, dataset_name="dsM", features_dir=feats, created_at=newer)
-    _make_model(db, dataset_name="dsM", features_dir=feats, run_kind=None)  # legacy
+    _make_model(db, dataset_name="dsM", features_dir=feats, run_kind=None)  # untagged
     _make_model(db, dataset_name="other", features_dir=feats)  # different dataset
 
     resp = client.get("/api/datasets/dsM/models")

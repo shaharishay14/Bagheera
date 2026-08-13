@@ -40,3 +40,31 @@ def client(db):
     # thread never starts (it would use the real SessionLocal, not this test db).
     yield TestClient(app)
     app.dependency_overrides.clear()
+
+
+@pytest.fixture()
+def override_settings():
+    """Temporarily set attributes on the frozen `settings` dataclass.
+
+    Usage::
+
+        def test_x(override_settings, tmp_path):
+            override_settings(allowed_roots=[tmp_path], viz_cache_root=tmp_path)
+
+    Every attribute touched is restored when the test ends, so leaking a root
+    into an unrelated test is impossible.
+    """
+    from app.config import settings
+
+    saved: dict[str, object] = {}
+
+    def _apply(**kwargs) -> None:
+        for key, value in kwargs.items():
+            if key not in saved:
+                saved[key] = getattr(settings, key)
+            object.__setattr__(settings, key, value)
+
+    yield _apply
+
+    for key, value in saved.items():
+        object.__setattr__(settings, key, value)

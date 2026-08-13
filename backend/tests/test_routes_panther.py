@@ -144,5 +144,5 @@ def test_list_models_run_kind_filter(client, db, panther_env):
     assert len(single) == 1
     assert single[0]["run_kind"] == "single"
 
-    legacy = client.get("/api/panther/models?run_kind=kfold").json()
-    assert legacy == []
+    other = client.get("/api/panther/models?run_kind=kfold").json()
+    assert other == []
